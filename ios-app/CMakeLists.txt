@@ -1,0 +1,34 @@
+get_property(modules GLOBAL PROPERTY OBS_IOS_STATIC_LIBRARIES)
+get_property(module_data GLOBAL PROPERTY OBS_IOS_MODULE_DATA)
+
+add_executable(OBSApp MACOSX_BUNDLE
+  CoreBridge/OBSBridge.h
+  CoreBridge/OBSBridge.mm
+  UI/OBSApp.swift
+)
+target_link_libraries(OBSApp PRIVATE OBS::libobs OBS::libobs-metal ${modules}
+  "-framework UIKit" "-framework SwiftUI" "-framework Metal" "-framework QuartzCore")
+set_target_properties(OBSApp PROPERTIES
+  OUTPUT_NAME OBS
+  MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/Info.plist"
+  XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER org.obsproject.studio.ios
+  XCODE_ATTRIBUTE_SWIFT_VERSION 5.0
+  XCODE_ATTRIBUTE_CLANG_ENABLE_OBJC_ARC YES
+  XCODE_ATTRIBUTE_SWIFT_OBJC_BRIDGING_HEADER "${CMAKE_CURRENT_SOURCE_DIR}/CoreBridge/OBSBridge.h"
+  XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "1,2"
+)
+
+set(resources "${CMAKE_CURRENT_BINARY_DIR}/OBSData")
+file(COPY "${CMAKE_SOURCE_DIR}/libobs/data/" DESTINATION "${resources}/libobs")
+file(COPY "${CMAKE_SOURCE_DIR}/frontend/data/locale/" DESTINATION "${resources}/locale")
+file(COPY_FILE "${OBS_IOS_CA_BUNDLE}" "${resources}/certs.pem" ONLY_IF_DIFFERENT)
+foreach(entry IN LISTS module_data)
+  string(REPLACE "|" ";" fields "${entry}")
+  list(GET fields 0 module)
+  list(GET fields 1 data_dir)
+  if(IS_DIRECTORY "${data_dir}")
+    file(COPY "${data_dir}/" DESTINATION "${resources}/obs-plugins/${module}")
+  endif()
+endforeach()
+target_sources(OBSApp PRIVATE "${resources}")
+set_source_files_properties("${resources}" PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
