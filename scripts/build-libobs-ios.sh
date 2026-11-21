@@ -12,6 +12,19 @@ case "${1:-all}" in
 esac
 if (($#)); then shift; fi
 
+websocket="$root/obs-studio/plugins/obs-websocket"
+if [[ ! -f $websocket/CMakeLists.txt ]]; then
+  git -C obs-studio submodule update --init --depth 1 plugins/obs-websocket
+fi
+port_patch="$root/obs-studio/cmake/ios/obs-websocket.patch"
+websocket_source="$root/.build/ios/websocket-$(git -C "$websocket" rev-parse --short HEAD)"
+if [[ ! -f $websocket_source/.patched || $port_patch -nt $websocket_source/.patched ]]; then
+  mkdir -p "$websocket_source"
+  git -C "$websocket" archive HEAD | tar -x -C "$websocket_source"
+  patch -s -d "$websocket_source" -p1 < "$port_patch"
+  touch "$websocket_source/.patched"
+fi
+
 ca_bundle="$root/.deps-src/cacert-2026-11-05.pem"
 if [[ ! -f $ca_bundle ]]; then
   mkdir -p "$root/.deps-src"
@@ -31,6 +44,7 @@ for sdk in "${sdks[@]}"; do
     -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
     -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY -DOBS_VERSION_OVERRIDE=33.0.0-ios \
     -DOBS_IOS_APP_SOURCE_DIR="$root/ios-app" -DOBS_IOS_CA_BUNDLE="$ca_bundle" \
+    -DOBS_IOS_WEBSOCKET_SOURCE_DIR="$websocket_source" \
     -DENABLE_WEBSOCKET=ON "$@"
   cmake --build "$build" --config Release --parallel "${JOBS:-$(sysctl -n hw.logicalcpu)}"
 done

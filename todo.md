@@ -124,7 +124,7 @@ OBS-for-iOS/                          # 本独立外壳仓库（工作根目录�
 - [x] **1.1 在 `obs-studio/libobs/` 新增 `obs-ios.h` 与 `obs-ios.c`**
   * 定义能力位枚举 `obs_ios_track_flags`（`OBS_IOS_CAP_BACKGROUND_GPU`、`OBS_IOS_CAP_PRIVATE_SCREEN`、`OBS_IOS_CAP_DYNAMIC_PLUGIN`、`OBS_IOS_CAP_SPAWN_MUXER`、`OBS_IOS_CAP_PUBLIC_STORAGE`）。
   * 定义单向回调表 `struct obs_ios_host`（`get_capabilities`、`set_keepalive`、`start_screen_capture`、`stop_screen_capture`、`get_recording_dir`、`load_extra_plugins`），提供 `obs_ios_set_host()` 及默认包装函数。
-- [ ] **1.2 配置 `obs-studio/cmake/ios/` 与全功能插件白名单 + 静态模块注册**
+- [x] **1.2 配置 `obs-studio/cmake/ios/` 与全功能插件白名单 + 静态模块注册**
   * 新建 `obs-studio/cmake/ios/defaults.cmake`：关闭 `ENABLE_UI`、`ENABLE_BROWSER`（CEF）、`ENABLE_SCRIPTING`、`ENABLE_VIRTUALCAM`、`ENABLE_SERVICE_UPDATES`；**保持开启** `ENABLE_WEBSOCKET=ON`、`ENABLE_NEW_MPEGTS_OUTPUT=ON`（SRT/RIST）、`ENABLE_WEBRTC=ON`（WHIP）。
   * 在 `obs-studio/plugins/CMakeLists.txt` 增加 `if(OS_IOS)` 分支，纳入全部可复用的官方跨平台插件：`image-source`（含颜色源、图片源、幻灯片 `slideshow`）、`obs-transitions`、`obs-filters`、`text-freetype2`（通过 CoreText / 系统字体目录实现 `find-font-ios.m`，不引 Fontconfig）、`rtmp-services`（复用 stub 顶住 `file-updater`，完整保留 83+ 平台 `services.json`）、`obs-outputs`（RTMP/RTMPS/增强型 RTMP/Hybrid MP4 & MOV/Replay Buffer）、`obs-ffmpeg`（含 `ffmpeg_source` 媒体源与 AAC/音频编码，轨道 A 不拉 `ffmpeg-mux` 子进程）、`obs-x264`、`obs-webrtc`、`obs-websocket`。
   * 生成 `ios-static-modules.c` 静态模块注册表，在启动期完成全量插件注册，不依赖 `dlopen`；同时打包所有插件的 `data/`（含 `.effect` 着色器与全部 `locale/*.ini`）到 App Bundle。
