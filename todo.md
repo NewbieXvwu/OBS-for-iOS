@@ -115,7 +115,7 @@ OBS-for-iOS/                          # 本独立外壳仓库（工作根目录�
     * 滤镜与文字：`speexdsp`、`rnnoise`、`freetype`。
     * 网络流与远控协议：`libsrt`、`librist`（保留官方 SRT/RIST 推流）、`libdatachannel` 或官方 `obs-webrtc` 依赖（保留 WHIP 超低延迟推流）、`asio` + `websocketpp` + `nlohmann/json`（保留官方 `obs-websocket` 5.x 远程导播控制）。
   * 严禁在下载或编译脚本中添加 SHA-256 哈希校验逻辑。
-- [ ] **阶段 0 验收**：`.deps-prebuilt/` 下产出 `iphoneos-arm64` 与 `iphonesimulator-arm64` 静态库（`lipo -info` 校验架构无误），且 `git status` 中无任何工具链或依赖文件被追踪。
+- [x] **阶段 0 验收**：`.deps-prebuilt/` 下产出 `iphoneos-arm64` 与 `iphonesimulator-arm64` 静态库（`lipo -info` 校验架构无误），且 `git status` 中无任何工具链或依赖文件被追踪。
 
 ---
 
