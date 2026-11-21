@@ -121,7 +121,7 @@ OBS-for-iOS/                          # 本独立外壳仓库（工作根目录�
 
 ### 阶段 1：`obs-ios.h` 宿主总线、`libobs-metal`、零拷贝硬编与静态插件核心
 
-- [ ] **1.1 在 `obs-studio/libobs/` 新增 `obs-ios.h` 与 `obs-ios.c`**
+- [x] **1.1 在 `obs-studio/libobs/` 新增 `obs-ios.h` 与 `obs-ios.c`**
   * 定义能力位枚举 `obs_ios_track_flags`（`OBS_IOS_CAP_BACKGROUND_GPU`、`OBS_IOS_CAP_PRIVATE_SCREEN`、`OBS_IOS_CAP_DYNAMIC_PLUGIN`、`OBS_IOS_CAP_SPAWN_MUXER`、`OBS_IOS_CAP_PUBLIC_STORAGE`）。
   * 定义单向回调表 `struct obs_ios_host`（`get_capabilities`、`set_keepalive`、`start_screen_capture`、`stop_screen_capture`、`get_recording_dir`、`load_extra_plugins`），提供 `obs_ios_set_host()` 及默认包装函数。
 - [ ] **1.2 配置 `obs-studio/cmake/ios/` 与全功能插件白名单 + 静态模块注册**
