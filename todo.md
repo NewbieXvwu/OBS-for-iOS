@@ -39,7 +39,9 @@
 8. **严禁污染全局环境**
    * 所有下载的编译工具、第三方库源码、中间构建产物与预编译静态库，**必须全部放在本仓库工作目录下且被 `.gitignore` 忽略的目录内**。不得执行 `brew install` 修改系统全局环境（仅允许只读调用本机已安装的 Xcode / Command Line Tools）。
 
----
+9. **严禁以“当前环境缺少特权/授权接口/真机”为由将任务标为受阻（Zero False Blocking）**
+   * Entitlements 是打包期静态写入 plist 的配置，私有 API 均采用 `dlsym` / `NSClassFromString` 运行时动态解析，两者在 Mac 上均可 100% 完成编码、编译、链接与打包，**不存在“Mac 编译环境缺少授权接口”的阻塞**。
+   * 凡属“需真机运行期才能验证权限是否生效”的项，一律完成全部代码、Entitlements 注入与产物打包后勾选完成，并将真机验证步骤写入 `DEVICE_TEST_CHECKLIST.md`，严禁标为受阻停工。
 
 ## 1. 仓库拓扑与本地隔离目录规范
 
@@ -72,6 +74,7 @@ OBS-for-iOS/                          # 本独立外壳仓库（工作根目录�
 │   ├── CoreBridge/                   # C/ObjC++ 桥接、官方 .ini 词条加载器、静态插件注册
 │   ├── HostSideload/                 # 轨道 A：非越狱侧载宿主实现（公开 API）
 │   ├── HostPrivileged/               # 轨道 B：越狱 / TrollStore 特权宿主实现
+│   ├── BroadcastUploadExtension/     # 极简 ReplayKit 跨进程转发扩展（不链接 libobs）
 │   ├── Entitlements/                 # Sideload.entitlements 与 Privileged.entitlements
 │   └── UI/                           # 1:1 复刻官方 OBS 前端全部面板、设置页与对话框
 │
@@ -88,9 +91,7 @@ OBS-for-iOS/                          # 本独立外壳仓库（工作根目录�
 | 轨道 | 目标环境 | 核心能力边界 | 打包产物 |
 | :--- | :--- | :--- | :--- |
 | **轨道 A（主线）** | 非越狱侧载（AltStore / SideStore / 个人自签） | 完整前台导播台：1:1 官方 UI/工作室模式/多音轨/重放缓冲/外接屏投影/WebSocket/WHIP/SRT/RIST/10-bit HDR/相机/iPadOS 原生 UVC/WKWebView、`hybrid_mp4`/`hybrid_mov` 录像、静态插件 | `OBS-Sideload.ipa` |
-| **轨道 B（增量）** | 越狱（rootless） / TrollStore | 在轨道 A 全部能力上，运行时探测私有 Entitlement 解锁：后台 GPU 保活、私有帧缓冲/高内存跨应用抓屏、外部 `.dylib` 动态插件加载、`obs-ffmpeg-mux` 伴生进程（MKV/FLV/TS）、公共目录录像 | `OBS-Privileged.ipa` / `.deb` |
-
----
+| **轨道 B（增量）** | 越狱（rootless） / TrollStore | 在轨道 A 全部能力上，运行时探测私有 Entitlement 解锁：ReplayKit 轻量跨进程转发 + 后台 GPU 保活、可选动态探测私有抓屏、外部 `.dylib` 动态插件加载、`obs-ffmpeg-mux` 伴生进程（MKV/FLV/TS）、公共目录录像 | `OBS-Privileged.ipa` / `.deb` |
 
 ## 2. 阶段执行清单
 
@@ -187,8 +188,11 @@ OBS-for-iOS/                          # 本独立外壳仓库（工作根目录�
 - [x] **4.1 实现运行时特权探测与 `ios-app/HostPrivileged/`**
   * 启动时探测进程实际持有的 Entitlements 或 rootless 越狱路径，动态返回 `obs_ios_track_flags`。
   * 所有私有类/私有符号一律通过 `NSClassFromString` / `dlsym` 动态解析，解析失败即清零对应能力位，平滑退回轨道 A。
-- [ ] **4.2 解锁后台 GPU 保活与 `ios-screen` 跨应用屏幕采集**
-  * 轨道 B 申请后台持续运行断言，放行后台 Metal 渲染与硬编；对接私有 `IOSurface` / 帧缓冲采集路径向 `ios-screen` 零拷贝供帧（彻底摆脱 ReplayKit 50 MB 限制）。
+- [ ] **4.2 实现跨应用屏幕采集（`ios-screen`）与后台保活通路（严禁标为受阻）**
+  * **主通路（ReplayKit 轻量转发 Extension + 主进程合成）**：新增极简 `BroadcastUploadExtension`（**不链接 `libobs`**，内存严格控制在 20 MB 内），将系统回调的视频 `CVPixelBuffer`（`IOSurface` / 共享内存）与音频 PCM 通过 App Group 本地 Unix Socket / Mach IPC 零拷贝转发给主进程 `ios-screen` 源。
+  * **后台保活与特权 Entitlements**：在 `Privileged.entitlements` 静态写入后台保活与提权配置（如 `com.apple.multitasking.systemappassertions`、`com.apple.private.memorystatus`、`com.apple.QuartzCore.global-capture` 等），在 `HostPrivileged` 中通过 `NSClassFromString` / `dlsym` 动态探测并持有后台运行断言（`RBSAssertion` / `BKSProcessAssertion`）及可选私有抓屏接口（如 `FigScreenCaptureController` / `CARenderServerRenderDisplay`），并结合静音音频会话维持后台活跃。
+  * **验收**：Mac 端完成全部代码、`BroadcastUploadExtension` 嵌入、`Privileged.entitlements` 静态写入与 `OBS-Privileged.ipa` 重新打包，即视为本项完成；真实跨应用抓屏与后台 GPU 连续推流记入 `DEVICE_TEST_CHECKLIST.md`，绝不允许标为受阻。
+  * **本地进度**：系统选择器、ReplayKit 扩展、App Group 套接字、视频与应用音频、双轨打包已接通。扩展写入共享页时复制一次，宿主直接映射。私有抓屏和后台断言仍未实现。
 - [x] **4.3 解锁外部 `.dylib` 动态插件加载与公共目录存储**
   * 检测到 `OBS_IOS_CAP_DYNAMIC_PLUGIN` 时，在静态核心插件之后额外扫描 `/var/jb/Library/OBS/Plugins` 或自定义目录调用 `obs_open_module` 加载外部插件。
   * 检测到 `OBS_IOS_CAP_PUBLIC_STORAGE` 时，开放自定义路径写入 `/var/mobile/Media/OBS`。
@@ -196,7 +200,8 @@ OBS-for-iOS/                          # 本独立外壳仓库（工作根目录�
   * 轨道 B 打包附带 `obs-ffmpeg-mux` 二进制；检测到 `OBS_IOS_CAP_SPAWN_MUXER` 时，设置页自动解锁 MKV / FLV / TS 等全部封装格式。
 - [x] **4.5 完善 `scripts/package-ipa.sh`（轨道 B 双产物输出）**
   * 注入 `Privileged.entitlements`，单次脚本同时输出 `OBS-Sideload.ipa`、`OBS-Privileged.ipa`（TrollStore）与 rootless `.deb` 至 `.build/release/`。
-- [x] **阶段 4 验收**：单次构建脚本同时产出两套完整安装包，确认权限文件（Entitlements）与附带二进制差异符合预期；汇总最终《待真机验证清单》结束交付。
+- [ ] **阶段 4 验收**：单次构建脚本同时产出两套完整安装包，确认权限文件（Entitlements）与附带二进制差异符合预期；汇总最终《待真机验证清单》结束交付。
+  * 两份 IPA 与 rootless 安装包已生成，广播扩展和 App Group 权限仅随轨道 B 发布。第 4.2 项中要求的私有权限未纳入产物。
 
 ---
 
