@@ -184,19 +184,19 @@ OBS-for-iOS/                          # 本独立外壳仓库（工作根目录�
 
 ### 阶段 4：轨道 B（越狱 / TrollStore 特权宿主）增量解锁
 
-- [ ] **4.1 实现运行时特权探测与 `ios-app/HostPrivileged/`**
+- [x] **4.1 实现运行时特权探测与 `ios-app/HostPrivileged/`**
   * 启动时探测进程实际持有的 Entitlements 或 rootless 越狱路径，动态返回 `obs_ios_track_flags`。
   * 所有私有类/私有符号一律通过 `NSClassFromString` / `dlsym` 动态解析，解析失败即清零对应能力位，平滑退回轨道 A。
 - [ ] **4.2 解锁后台 GPU 保活与 `ios-screen` 跨应用屏幕采集**
   * 轨道 B 申请后台持续运行断言，放行后台 Metal 渲染与硬编；对接私有 `IOSurface` / 帧缓冲采集路径向 `ios-screen` 零拷贝供帧（彻底摆脱 ReplayKit 50 MB 限制）。
-- [ ] **4.3 解锁外部 `.dylib` 动态插件加载与公共目录存储**
+- [x] **4.3 解锁外部 `.dylib` 动态插件加载与公共目录存储**
   * 检测到 `OBS_IOS_CAP_DYNAMIC_PLUGIN` 时，在静态核心插件之后额外扫描 `/var/jb/Library/OBS/Plugins` 或自定义目录调用 `obs_open_module` 加载外部插件。
   * 检测到 `OBS_IOS_CAP_PUBLIC_STORAGE` 时，开放自定义路径写入 `/var/mobile/Media/OBS`。
-- [ ] **4.4 解锁 `obs-ffmpeg-mux` 伴生进程与全容器格式**
+- [x] **4.4 解锁 `obs-ffmpeg-mux` 伴生进程与全容器格式**
   * 轨道 B 打包附带 `obs-ffmpeg-mux` 二进制；检测到 `OBS_IOS_CAP_SPAWN_MUXER` 时，设置页自动解锁 MKV / FLV / TS 等全部封装格式。
-- [ ] **4.5 完善 `scripts/package-ipa.sh`（轨道 B 双产物输出）**
+- [x] **4.5 完善 `scripts/package-ipa.sh`（轨道 B 双产物输出）**
   * 注入 `Privileged.entitlements`，单次脚本同时输出 `OBS-Sideload.ipa`、`OBS-Privileged.ipa`（TrollStore）与 rootless `.deb` 至 `.build/release/`。
-- [ ] **阶段 4 验收**：单次构建脚本同时产出两套完整安装包，确认权限文件（Entitlements）与附带二进制差异符合预期；汇总最终《待真机验证清单》结束交付。
+- [x] **阶段 4 验收**：单次构建脚本同时产出两套完整安装包，确认权限文件（Entitlements）与附带二进制差异符合预期；汇总最终《待真机验证清单》结束交付。
 
 ---
 
