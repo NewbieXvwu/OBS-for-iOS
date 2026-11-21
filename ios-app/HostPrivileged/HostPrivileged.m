@@ -32,6 +32,7 @@ static NSString *const plugins_directory = @"/var/jb/Library/OBS/Plugins";
 static NSString *const gpu_entitlement = @"com.apple.developer.background-tasks.continued-processing.gpu";
 static BGTask *background_task;
 static NSString *background_identifier;
+static bool background_task_registered;
 static bool output_running, screen_running;
 static AVAudioEngine *keepalive_audio;
 static AVAudioSourceNode *silence;
@@ -303,7 +304,7 @@ void obs_app_privileged_background_job(bool running)
 {
 	output_running = running;
 	update_process_keepalive();
-	if (!(get_capabilities() & OBS_IOS_CAP_BACKGROUND_GPU))
+	if (!background_task_registered)
 		return;
 	if (@available(iOS 26.0, *)) {
 		BGTaskScheduler *scheduler = BGTaskScheduler.sharedScheduler;
@@ -359,6 +360,10 @@ void obs_app_privileged_frontend_ready(void)
 {
 	obs_frontend_add_event_callback(output_event, NULL);
 	NSNotificationCenter *center = NSNotificationCenter.defaultCenter;
+	[center addObserverForName:UIApplicationDidBecomeActiveNotification object:nil queue:NSOperationQueue.mainQueue
+		usingBlock:^(NSNotification *notification) {
+			obs_app_privileged_background_job(output_running);
+		}];
 	[center addObserverForName:AVAudioEngineConfigurationChangeNotification object:nil queue:NSOperationQueue.mainQueue
 		usingBlock:^(NSNotification *notification) {
 			if (notification.object == keepalive_audio && (output_running || screen_running))
@@ -380,7 +385,8 @@ void obs_app_install_privileged_host(void)
 		detected |= OBS_IOS_CAP_DYNAMIC_PLUGIN;
 	if (os_mkdirs(public_directory) >= 0 && access(public_directory, W_OK) == 0)
 		detected |= OBS_IOS_CAP_PUBLIC_STORAGE;
-	if (register_background_task() ||
+	background_task_registered = register_background_task();
+	if (background_task_registered ||
 	    (has_entitlement(@"com.apple.multitasking.systemappassertions") && has_entitlement(gpu_entitlement) && assertion_class()))
 		detected |= OBS_IOS_CAP_BACKGROUND_GPU;
 	if (obs_ios_replaykit_available())
