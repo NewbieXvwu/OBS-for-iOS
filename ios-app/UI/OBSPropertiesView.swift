@@ -4,6 +4,9 @@
 
 import SwiftUI
 import UniformTypeIdentifiers
+#if OBS_APP_PRIVILEGED
+import ReplayKit
+#endif
 
 final class OBSPropertyEditor: ObservableObject {
     let properties: OpaquePointer
@@ -163,17 +166,34 @@ private struct OBSPropertyRow<Children: View>: View {
                 DisclosureGroup(title) { children() }
             }
         case OBS_PROPERTY_BUTTON:
-            Button(title) {
-                if obs_property_button_type(property) == OBS_BUTTON_URL,
-                   let target = obs_property_button_url(property), let url = URL(string: String(cString: target)),
-                   ["https", "http"].contains(url.scheme?.lowercased() ?? "") {
-                    UIApplication.shared.open(url)
-                } else if obs_property_button_clicked(property, editor.source.map(UnsafeMutableRawPointer.init)) {
-                    editor.objectWillChange.send()
+            #if OBS_APP_PRIVILEGED
+            if key == "broadcast", let source = editor.source,
+               String(cString: obs_source_get_id(source)) == "ios_screen_capture" {
+                HStack {
+                    Text(title)
+                    Spacer()
+                    OBSBroadcastPicker {
+                        obs_property_button_clicked(property, UnsafeMutableRawPointer(source))
+                    }.frame(width: 44, height: 44)
                 }
-            }
+            } else { propertyButton }
+            #else
+            propertyButton
+            #endif
         default:
             EmptyView()
+        }
+    }
+
+    private var propertyButton: some View {
+        Button(title) {
+            if obs_property_button_type(property) == OBS_BUTTON_URL,
+               let target = obs_property_button_url(property), let url = URL(string: String(cString: target)),
+               ["https", "http"].contains(url.scheme?.lowercased() ?? "") {
+                UIApplication.shared.open(url)
+            } else if obs_property_button_clicked(property, editor.source.map(UnsafeMutableRawPointer.init)) {
+                editor.objectWillChange.send()
+            }
         }
     }
 
@@ -451,6 +471,22 @@ private struct OBSPropertyRow<Children: View>: View {
         return destination
     }
 }
+
+#if OBS_APP_PRIVILEGED
+private struct OBSBroadcastPicker: UIViewRepresentable {
+    let start: () -> Bool
+
+    func makeUIView(context: Context) -> RPSystemBroadcastPickerView {
+        let picker = RPSystemBroadcastPickerView(frame: CGRect(x: 0, y: 0, width: 44, height: 44))
+        picker.preferredExtension = "org.obsproject.studio.ios.broadcast"
+        picker.showsMicrophoneButton = false
+        picker.isUserInteractionEnabled = start()
+        return picker
+    }
+
+    func updateUIView(_ view: RPSystemBroadcastPickerView, context: Context) {}
+}
+#endif
 
 struct SourcePropertiesView: View {
     let source: SourceReference

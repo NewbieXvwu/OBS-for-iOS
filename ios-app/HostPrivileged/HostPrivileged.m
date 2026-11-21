@@ -16,9 +16,14 @@
 #include <util/bmem.h>
 #include <util/platform.h>
 
+#if !TARGET_OS_SIMULATOR
 bool obs_ios_screen_available(void);
 bool obs_ios_start_authorized_screen(obs_ios_screen_frame_cb, void *);
 void obs_ios_stop_authorized_screen(void *);
+#endif
+bool obs_ios_replaykit_available(void);
+bool obs_ios_start_replaykit(obs_ios_screen_frame_cb, obs_ios_screen_audio_cb, void *);
+void obs_ios_stop_replaykit(void *);
 
 static _Atomic(uint32_t) capabilities;
 static const char public_directory[] = "/var/mobile/Media/OBS";
@@ -50,6 +55,27 @@ static bool has_entitlement(NSString *name)
 static uint32_t get_capabilities(void)
 {
 	return atomic_load_explicit(&capabilities, memory_order_relaxed);
+}
+
+static bool start_screen_capture(obs_ios_screen_frame_cb frame, obs_ios_screen_audio_cb audio, void *context)
+{
+	if (get_capabilities() & OBS_IOS_CAP_REPLAYKIT)
+		return obs_ios_start_replaykit(frame, audio, context);
+#if TARGET_OS_SIMULATOR
+	return false;
+#else
+	return obs_ios_start_authorized_screen(frame, context);
+#endif
+}
+
+static void stop_screen_capture(void *context)
+{
+	if (get_capabilities() & OBS_IOS_CAP_REPLAYKIT)
+		obs_ios_stop_replaykit(context);
+#if !TARGET_OS_SIMULATOR
+	else
+		obs_ios_stop_authorized_screen(context);
+#endif
 }
 
 static const char *recording_directory(void)
@@ -199,14 +225,18 @@ void obs_app_install_privileged_host(void)
 		detected |= OBS_IOS_CAP_PUBLIC_STORAGE;
 	if (register_background_task())
 		detected |= OBS_IOS_CAP_BACKGROUND_GPU;
-	if (obs_ios_screen_available())
+	if (obs_ios_replaykit_available())
+		detected |= OBS_IOS_CAP_PRIVATE_SCREEN | OBS_IOS_CAP_REPLAYKIT;
+#if !TARGET_OS_SIMULATOR
+	else if (obs_ios_screen_available())
 		detected |= OBS_IOS_CAP_PRIVATE_SCREEN;
+#endif
 	atomic_store_explicit(&capabilities, detected, memory_order_relaxed);
 	const struct obs_ios_host host = {
 		.get_capabilities = get_capabilities,
 		.set_keepalive = keepalive,
-		.start_screen_capture = obs_ios_start_authorized_screen,
-		.stop_screen_capture = obs_ios_stop_authorized_screen,
+		.start_screen_capture = start_screen_capture,
+		.stop_screen_capture = stop_screen_capture,
 		.get_recording_dir = recording_directory,
 		.load_extra_plugins = load_plugins,
 	};

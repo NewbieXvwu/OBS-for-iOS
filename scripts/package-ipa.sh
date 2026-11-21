@@ -24,6 +24,8 @@ build_package() {
     local mux="$build/plugins/obs-ffmpeg/ffmpeg-mux/Release-iphoneos/obs-ffmpeg-mux.app/obs-ffmpeg-mux"
     cp "$mux" "$app/obs-ffmpeg-mux"
     codesign --force --sign - "$app/obs-ffmpeg-mux"
+    codesign --force --sign - --entitlements ios-app/Entitlements/BroadcastUpload.entitlements \
+      "$app/PlugIns/OBSBroadcast.appex"
   fi
   codesign --force --sign - --entitlements "ios-app/Entitlements/$kind.entitlements" "$app"
   (cd "$work" && zip -qry -y "OBS-$kind.ipa" Payload)
