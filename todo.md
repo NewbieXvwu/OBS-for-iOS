@@ -168,17 +168,17 @@ OBS-for-iOS/                          # 本独立外壳仓库（工作根目录�
 
 ### 阶段 3：浏览器源、外接屏投影、多视图与轨道 A 侧载发布闭环
 
-- [ ] **3.1 实现 `ios-browser` 插件（WKWebView 浏览器源）**
+- [x] **3.1 实现 `ios-browser` 插件（WKWebView 浏览器源）**
   * 托管系统 `WKWebView`，支持自定义 URL、分辨率、帧率上限、自定义 CSS 注入、刷新缓存与透明背景（`isOpaque = false` + `clear` 背景保留 Alpha）。
-- [ ] **3.2 实现多视图（Multiview）与外接显示器全屏投影仪（Projector）**
+- [x] **3.2 实现多视图（Multiview）与外接显示器全屏投影仪（Projector）**
   * 复刻官方 Multiview 网格布局。
   * 利用 iOS `UIWindowScene` 外部屏幕连接通知，将官方全屏投影仪（Fullscreen Projector：Program / Preview / 单场景 / 单来源）直接通过 `CAMetalLayer` 输出至 USB-C HDMI 或 AirPlay 外接显示器。
-- [ ] **3.3 完善轨道 A 前后台 Metal 队列排空、沙盒共享与容量预警**
+- [x] **3.3 完善轨道 A 前后台 Metal 队列排空、沙盒共享与容量预警**
   * 轨道 A 收到 `willResignActive` / `didEnterBackground` 时，同步排空当前 `MTLCommandBuffer` 并挂起视频线程，杜绝后台提交 GPU 被杀；回到前台自动重建可绘制面。
   * 在 `Info.plist` 开启 `UIFileSharingEnabled` 与 `LSSupportsOpeningDocumentsInPlace`，录像默认落盘 `Documents/OBS`；通过 `volumeAvailableCapacityForImportantUsage` 检测剩余空间（低于 100 MiB 安全停录）。
-- [ ] **3.4 编写 `scripts/package-ipa.sh`（轨道 A）**
+- [x] **3.4 编写 `scripts/package-ipa.sh`（轨道 A）**
   * 使用最小权限 `Sideload.entitlements`（相机、麦克风、本地网络）产出无个人证书绑定的纯净 `OBS-Sideload.ipa` 至 `.build/release/`。
-- [ ] **阶段 3 验收**：模拟器完成 WKWebView 源加载、Multiview 渲染与 `OBS-Sideload.ipa` 完整打包产物结构验证（随即关闭模拟器）；真机专属项（UVC 采集卡、外接 HDMI 屏、长时间硬编热稳）记录进待真机验证清单，**不阻塞进入阶段 4**。
+- [x] **阶段 3 验收**：模拟器完成 WKWebView 源加载、Multiview 渲染与 `OBS-Sideload.ipa` 完整打包产物结构验证（随即关闭模拟器）；真机专属项（UVC 采集卡、外接 HDMI 屏、长时间硬编热稳）记录进待真机验证清单，**不阻塞进入阶段 4**。
 
 ---
 
