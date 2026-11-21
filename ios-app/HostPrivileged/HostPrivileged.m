@@ -24,9 +24,8 @@ static _Atomic(uint32_t) capabilities;
 static const char public_directory[] = "/var/mobile/Media/OBS";
 static NSString *const plugins_directory = @"/var/jb/Library/OBS/Plugins";
 static NSString *const gpu_entitlement = @"com.apple.developer.background-tasks.continued-processing.gpu";
-static id background_task;
+static BGTask *background_task;
 static NSString *background_identifier;
-static bool background_requested;
 extern char **environ;
 
 static bool has_entitlement(NSString *name)
@@ -116,6 +115,17 @@ static bool keepalive(bool enabled)
 	return enabled && background_task != nil;
 }
 
+static void finish_background_task(BGTask *task, bool success)
+{
+	if (!task || task != background_task)
+		return;
+	if (UIApplication.sharedApplication.applicationState != UIApplicationStateActive)
+		obs_ios_set_video_suspended(true);
+	background_task = nil;
+	background_identifier = nil;
+	[task setTaskCompletedWithSuccess:success];
+}
+
 static bool register_background_task(void)
 {
 	if (@available(iOS 26.0, *)) {
@@ -126,19 +136,18 @@ static bool register_background_task(void)
 		NSString *identifier = [NSBundle.mainBundle.bundleIdentifier stringByAppendingString:@".rendering.*"];
 		return [BGTaskScheduler.sharedScheduler registerForTaskWithIdentifier:identifier
 			usingQueue:dispatch_get_main_queue() launchHandler:^(BGTask *task) {
-				if (!background_requested) {
+				if (background_task || ![task.identifier isEqualToString:background_identifier]) {
 					[task setTaskCompletedWithSuccess:NO];
 					return;
 				}
 				background_task = task;
 				BGContinuedProcessingTask *rendering = (BGContinuedProcessingTask *)task;
 				rendering.progress.totalUnitCount = -1;
+				__weak BGTask *expired_task = task;
 				task.expirationHandler = ^{
-					if (UIApplication.sharedApplication.applicationState != UIApplicationStateActive)
-						obs_ios_set_video_suspended(true);
-					[background_task setTaskCompletedWithSuccess:NO];
-					background_task = nil;
-					background_requested = false;
+					dispatch_async(dispatch_get_main_queue(), ^{
+						finish_background_task(expired_task, false);
+					});
 				};
 				if (UIApplication.sharedApplication.applicationState != UIApplicationStateActive)
 					obs_ios_set_video_suspended(false);
@@ -154,16 +163,15 @@ void obs_app_privileged_background_job(bool running)
 	if (@available(iOS 26.0, *)) {
 		BGTaskScheduler *scheduler = BGTaskScheduler.sharedScheduler;
 		if (!running) {
-			if (background_identifier)
+			if (background_task) {
+				finish_background_task(background_task, true);
+			} else if (background_identifier) {
 				[scheduler cancelTaskRequestWithIdentifier:background_identifier];
-			if (background_task)
-				[background_task setTaskCompletedWithSuccess:YES];
-			background_requested = false;
-			background_task = nil;
-			background_identifier = nil;
+				background_identifier = nil;
+			}
 			return;
 		}
-		if (background_requested || UIApplication.sharedApplication.applicationState != UIApplicationStateActive)
+		if (background_identifier || UIApplication.sharedApplication.applicationState != UIApplicationStateActive)
 			return;
 		NSString *title = @(obs_frontend_get_locale_string(obs_frontend_streaming_active() ? "Basic.Main.StartStreaming" :
 			obs_frontend_recording_active() ? "Basic.Main.StartRecording" : "Basic.Main.StartReplayBuffer"));
@@ -174,11 +182,11 @@ void obs_app_privileged_background_job(bool running)
 		request.strategy = BGContinuedProcessingTaskRequestSubmissionStrategyFail;
 		request.requiredResources = BGContinuedProcessingTaskRequestResourcesGPU;
 		NSError *error = nil;
-		background_requested = [scheduler submitTaskRequest:request error:&error];
-		if (background_requested)
-			background_identifier = identifier;
-		else
+		background_identifier = identifier;
+		if (![scheduler submitTaskRequest:request error:&error]) {
+			background_identifier = nil;
 			blog(LOG_INFO, "[iOS host] %s", error.localizedDescription.UTF8String ?: "Background GPU unavailable");
+		}
 	}
 }
 

@@ -21,7 +21,20 @@ API_AVAILABLE(ios(27.0))
 
 static NSObject *screen_lock;
 static id active_screen;
-void obs_ios_stop_authorized_screen(void *context);
+
+API_AVAILABLE(ios(27.0))
+static void stop_screen(OBSAuthorizedScreen *capture)
+{
+	@synchronized (screen_lock) {
+		if (!capture || active_screen != capture)
+			return;
+		if (capture->callback)
+			capture->callback(capture->context, NULL, 0);
+		capture->callback = NULL;
+		active_screen = nil;
+		dispatch_async(dispatch_get_main_queue(), ^{ [capture end]; });
+	}
+}
 
 API_AVAILABLE(ios(27.0))
 @implementation OBSAuthorizedScreen
@@ -41,51 +54,60 @@ API_AVAILABLE(ios(27.0))
 {
 	[SCContentSharingPicker.sharedPicker removeObserver:self];
 	SCContentSharingPicker.sharedPicker.active = NO;
-	[_stream stopCaptureWithCompletionHandler:nil];
-	_stream = nil;
+	SCStream *stream;
+	@synchronized (screen_lock) {
+		stream = _stream;
+		_stream = nil;
+	}
+	[stream stopCaptureWithCompletionHandler:nil];
 }
 
 - (void)contentSharingPicker:(SCContentSharingPicker *)picker didCancelForStream:(SCStream *)stream
 {
-	obs_ios_stop_authorized_screen(context);
+	stop_screen(self);
 }
 
 - (void)contentSharingPickerStartDidFailWithError:(NSError *)error
 {
 	blog(LOG_WARNING, "[ios-screen] %s", error.localizedDescription.UTF8String);
-	obs_ios_stop_authorized_screen(context);
+	stop_screen(self);
 }
 
 - (void)contentSharingPicker:(SCContentSharingPicker *)picker
 	didUpdateWithFilter:(SCContentFilter *)filter forStream:(SCStream *)updated
 {
 	dispatch_async(dispatch_get_main_queue(), ^{
+		SCStreamConfiguration *configuration = [SCStreamConfiguration new];
+		SCStream *stream = [[SCStream alloc] initWithFilter:filter configuration:configuration delegate:self];
+		SCStream *previous;
 		@synchronized (screen_lock) {
 			if (active_screen != self)
 				return;
+			previous = self.stream;
+			self.stream = stream;
 		}
-		if (self.stream) {
-			[self.stream stopCaptureWithCompletionHandler:nil];
-			self.stream = nil;
-		}
-		SCStreamConfiguration *configuration = [SCStreamConfiguration new];
-		self.stream = [[SCStream alloc] initWithFilter:filter configuration:configuration delegate:self];
+		[previous stopCaptureWithCompletionHandler:nil];
 		NSError *error = nil;
-		if (![self.stream addStreamOutput:self type:SCStreamOutputTypeScreen sampleHandlerQueue:self.frames error:&error]) {
-			[self contentSharingPickerStartDidFailWithError:error];
+		if (![stream addStreamOutput:self type:SCStreamOutputTypeScreen sampleHandlerQueue:self.frames error:&error]) {
+			[self stream:stream didStopWithError:error];
 			return;
 		}
-		[self.stream startCaptureWithCompletionHandler:^(NSError *startError) {
+		[stream startCaptureWithCompletionHandler:^(NSError *startError) {
 			if (startError)
-				[self contentSharingPickerStartDidFailWithError:startError];
+				[self stream:stream didStopWithError:startError];
 		}];
 	});
 }
 
 - (void)stream:(SCStream *)stream didStopWithError:(NSError *)error
 {
-	if (stream == _stream)
-		obs_ios_stop_authorized_screen(context);
+	@synchronized (screen_lock) {
+		if (active_screen != self || stream != _stream)
+			return;
+		if (error)
+			blog(LOG_WARNING, "[ios-screen] %s", error.localizedDescription.UTF8String);
+		stop_screen(self);
+	}
 }
 
 - (void)stream:(SCStream *)stream didOutputSampleBuffer:(CMSampleBufferRef)sample
@@ -101,7 +123,7 @@ API_AVAILABLE(ios(27.0))
 		? (uint64_t)CMTimeConvertScale(timestamp, 1000000000, kCMTimeRoundingMethod_Default).value
 		: os_gettime_ns();
 	@synchronized (screen_lock) {
-		if (active_screen == self && callback)
+		if (active_screen == self && stream == _stream && callback)
 			callback(context, frame, nanos);
 	}
 }
@@ -131,8 +153,8 @@ bool obs_ios_start_authorized_screen(obs_ios_screen_frame_cb callback, void *con
 			capture->context = context;
 			capture.frames = dispatch_queue_create("org.obsproject.ios.screen.frames", DISPATCH_QUEUE_SERIAL);
 			active_screen = capture;
+			dispatch_async(dispatch_get_main_queue(), ^{ [capture present]; });
 		}
-		dispatch_async(dispatch_get_main_queue(), ^{ [capture present]; });
 		return true;
 	}
 	return false;
@@ -141,14 +163,10 @@ bool obs_ios_start_authorized_screen(obs_ios_screen_frame_cb callback, void *con
 void obs_ios_stop_authorized_screen(void *context)
 {
 	if (@available(iOS 27.0, *)) {
-		OBSAuthorizedScreen *capture;
 		@synchronized (screen_lock) {
-			capture = active_screen;
-			if (!capture || capture->context != context)
-				return;
-			capture->callback = NULL;
-			active_screen = nil;
+			OBSAuthorizedScreen *capture = active_screen;
+			if (capture && capture->context == context)
+				stop_screen(capture);
 		}
-		dispatch_async(dispatch_get_main_queue(), ^{ [capture end]; });
 	}
 }
