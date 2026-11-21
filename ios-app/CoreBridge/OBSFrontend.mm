@@ -15,6 +15,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <string_view>
 
 namespace fs = std::filesystem;
 
@@ -73,6 +74,12 @@ class IOSFrontend final : public obs_frontend_callbacks {
 	std::vector<SaveCallback> saveCallbacks, preloadCallbacks;
 	std::vector<obs_frontend_translate_ui_cb> extraTranslations;
 	std::vector<OBSSource> sources, scenes, transitions;
+	struct UndoAction {
+		std::string name, before, after;
+		undo_redo_cb undo, redo;
+	};
+	std::vector<UndoAction> undoActions;
+	size_t undoPosition = 0;
 	OBSSource program, preview, transition;
 	std::vector<OBSCanvas> canvases;
 	OBSSceneItem copiedItem;
@@ -99,12 +106,33 @@ class IOSFrontend final : public obs_frontend_callbacks {
 		return [documents URLByAppendingPathComponent:@"OBS" isDirectory:YES].fileSystemRepresentation;
 	}
 
+	std::string configuredRecordingDirectory()
+	{
+		config_t *config = profileConfig();
+		bool advanced = strcmp(config_get_string(config, "Output", "Mode"), "Advanced") == 0;
+		const char *directory = config_get_string(config, advanced ? "AdvOut" : "SimpleOutput",
+							 advanced ? "RecFilePath" : "FilePath");
+		return directory && *directory ? directory : recordingDirectory();
+	}
+
+	bool hasRecordingCapacity(const std::string &directory)
+	{
+		NSURL *url = [NSURL fileURLWithFileSystemRepresentation:directory.c_str() isDirectory:YES relativeToURL:nil];
+		NSNumber *available = nil;
+		[url getResourceValue:&available forKey:NSURLVolumeAvailableCapacityForImportantUsageKey error:nullptr];
+		if (!available || available.longLongValue >= 100LL * 1024 * 1024)
+			return true;
+		uiMessage(@"OutputError", @{@"message": @(obs_frontend_get_locale_string("Output.RecordNoSpace.Msg"))});
+		return false;
+	}
+
 	void profileDefaults(config_t *config)
 	{
 		config_set_default_string(config, "Output", "Mode", "Simple");
 		config_set_default_string(config, "Output", "FilenameFormatting", "%CCYY-%MM-%DD %hh-%mm-%ss");
 		config_set_default_string(config, "SimpleOutput", "StreamEncoder", "x264");
 		config_set_default_string(config, "SimpleOutput", "RecEncoder", "x264");
+		config_set_default_string(config, "SimpleOutput", "RecQuality", "Stream");
 		config_set_default_uint(config, "SimpleOutput", "VBitrate", 2500);
 		config_set_default_uint(config, "SimpleOutput", "ABitrate", 160);
 		config_set_default_uint(config, "SimpleOutput", "RecTracks", 1);
@@ -116,6 +144,9 @@ class IOSFrontend final : public obs_frontend_callbacks {
 		config_set_default_string(config, "AdvOut", "RecFormat2", "hybrid_mp4");
 		config_set_default_string(config, "AdvOut", "Encoder", "obs_x264");
 		config_set_default_string(config, "AdvOut", "RecEncoder", "none");
+		config_set_default_string(config, "AdvOut", "AudioEncoder", "none");
+		config_set_default_string(config, "AdvOut", "RecAudioEncoder", "none");
+		config_set_default_bool(config, "AdvOut", "ApplyServiceSettings", true);
 		config_set_default_uint(config, "AdvOut", "TrackIndex", 1);
 		config_set_default_uint(config, "AdvOut", "RecTracks", 1);
 		config_set_default_uint(config, "AdvOut", "RecRBTime", 15);
@@ -146,8 +177,8 @@ class IOSFrontend final : public obs_frontend_callbacks {
 		config_set_default_uint(config, "Audio", "SampleRate", 48000);
 		config_set_default_string(config, "Audio", "ChannelSetup", "Stereo");
 		config_set_default_string(config, "Audio", "MonitoringDeviceId", "default");
-		config_set_default_string(config, "Audio", "MeterDecay", "Fast");
-		config_set_default_bool(config, "Audio", "TruePeak", true);
+		config_set_default_double(config, "Audio", "MeterDecayRate", 23.53);
+		config_set_default_uint(config, "Audio", "PeakMeterType", 1);
 	}
 
 	bool openProfile(const std::string &name)
@@ -210,11 +241,15 @@ class IOSFrontend final : public obs_frontend_callbacks {
 			if (source)
 				transitions.emplace_back(source.Get());
 		}
-		for (const char *id : {"cut_transition", "fade_transition"}) {
+		for (const char *id : {"cut_transition", "fade_transition", "swipe_transition", "slide_transition",
+				       "obs_stinger_transition", "luma_wipe_transition"}) {
+			const char *label = obs_source_get_display_name(id);
+			if (!label)
+				continue;
 			if (std::none_of(transitions.begin(), transitions.end(), [id](const auto &source) {
 				    return strcmp(obs_source_get_id(source), id) == 0;
 			    })) {
-				OBSSourceAutoRelease source = obs_source_create_private(id, obs_source_get_display_name(id), NULL);
+				OBSSourceAutoRelease source = obs_source_create_private(id, label, NULL);
 				if (source)
 					transitions.emplace_back(source.Get());
 			}
@@ -311,11 +346,22 @@ class IOSFrontend final : public obs_frontend_callbacks {
 				id = "rtmp_output";
 			obs_data_set_bool(outputSettings, "dyn_bitrate", config_get_bool(config, "Output", "DynamicBitrate"));
 		} else {
-			const char *configured = config_get_string(config, section, advanced ? "RecFilePath" : "FilePath");
-			std::string directory = configured && *configured ? configured : recordingDirectory();
+			std::string directory = configuredRecordingDirectory();
 			if (os_mkdirs(directory.c_str()) < 0)
 				return;
-			const char *extension = hybrid || !canSpawn ? (mov ? "mov" : "mp4") : format;
+			if (!hasRecordingCapacity(directory))
+				return;
+			const char *extension = format;
+			if (hybrid || !canSpawn)
+				extension = mov ? "mov" : "mp4";
+			else if (strcmp(format, "fragmented_mp4") == 0)
+				extension = "mp4";
+			else if (strcmp(format, "fragmented_mov") == 0)
+				extension = "mov";
+			else if (strcmp(format, "hls") == 0)
+				extension = "m3u8";
+			else if (strcmp(format, "mpegts") == 0)
+				extension = "ts";
 			const char *pattern = config_get_string(config, "Output", "FilenameFormatting");
 			if (slot == Replay) {
 				obs_data_set_string(outputSettings, "directory", directory.c_str());
@@ -328,11 +374,18 @@ class IOSFrontend final : public obs_frontend_callbacks {
 				obs_data_set_int(outputSettings, "max_size_mb", config_get_uint(config, section, "RecRBSize"));
 			} else {
 				char *file = os_generate_formatted_filename(extension, true, pattern);
-				recordingPath = (fs::path(directory) / file).string();
+					auto original = fs::path(directory) / file;
+					auto path = original;
+					for (unsigned index = 2; os_file_exists(path.c_str()); ++index)
+						path = original.parent_path() / (original.stem().string() + " (" + std::to_string(index) +
+										 ")" + original.extension().string());
+					recordingPath = path.string();
 				bfree(file);
 				obs_data_set_string(outputSettings, "path", recordingPath.c_str());
-				obs_data_set_string(outputSettings, "muxer_settings",
-						    config_get_string(config, section, "RecMuxerCustom"));
+					std::string muxer = config_get_string(config, section, "RecMuxerCustom") ?: "";
+					if (strncmp(format, "fragmented_", 11) == 0 && canSpawn)
+						muxer = "movflags=frag_keyframe+empty_moov+delay_moov " + muxer;
+					obs_data_set_string(outputSettings, "muxer_settings", muxer.c_str());
 			}
 		}
 		OBSOutputAutoRelease output = obs_output_create(id, id, outputSettings, NULL);
@@ -340,6 +393,9 @@ class IOSFrontend final : public obs_frontend_callbacks {
 			return;
 		const char *streamEncoder = config_get_string(config, section, advanced ? "Encoder" : "StreamEncoder");
 		const char *encoderId = slot == Stream ? streamEncoder : config_get_string(config, section, "RecEncoder");
+		const char *quality = config_get_string(config, "SimpleOutput", "RecQuality");
+		if (!advanced && strcmp(quality, "Stream") == 0)
+			encoderId = streamEncoder;
 		if (!encoderId || !*encoderId || strcmp(encoderId, "none") == 0)
 			encoderId = streamEncoder;
 		if (strcmp(encoderId, "x264") == 0)
@@ -352,11 +408,19 @@ class IOSFrontend final : public obs_frontend_callbacks {
 				obs_data_apply(encoderSettings, saved);
 		} else {
 			obs_data_set_int(encoderSettings, "bitrate", config_get_uint(config, section, "VBitrate"));
+			if (slot != Stream && strcmp(quality, "Stream") != 0) {
+				const bool high = strcmp(quality, "HQ") == 0;
+				obs_data_set_string(encoderSettings, "rate_control", "CRF");
+				obs_data_set_int(encoderSettings, "crf", high ? 16 : 23);
+				obs_data_set_int(encoderSettings, "quality", high ? 82 : 67);
+			}
 		}
 		OBSDataAutoRelease audioSettings = obs_data_create();
 		obs_data_set_int(audioSettings, "bitrate", config_get_uint(config, "SimpleOutput", "ABitrate"));
+		const bool applyServiceSettings = !advanced || config_get_bool(config, "AdvOut", "ApplyServiceSettings");
 		if (slot == Stream) {
-			obs_service_apply_encoder_settings(service, encoderSettings, audioSettings);
+			if (applyServiceSettings)
+				obs_service_apply_encoder_settings(service, encoderSettings, audioSettings);
 			obs_output_set_service(output, service);
 			obs_output_set_reconnect_settings(output,
 				config_get_bool(config, "Output", "Reconnect") ? (int)config_get_uint(config, "Output", "MaxRetries") : 0,
@@ -372,13 +436,24 @@ class IOSFrontend final : public obs_frontend_callbacks {
 		obs_output_set_video_encoder(output, video);
 		uint64_t tracks = slot == Stream ? (1ULL << (std::clamp<uint64_t>(config_get_uint(config, "AdvOut", "TrackIndex"), 1, 6) - 1))
 					       : config_get_uint(config, section, "RecTracks");
-		const char *audioId = strcmp(id, "whip_output") == 0 ? "ffmpeg_opus" : "ffmpeg_aac";
+		const char *audioId = strcmp(id, "whip_output") == 0 ? "ffmpeg_opus" :
+			obs_encoder_get_display_name("CoreAudio_AAC") ? "CoreAudio_AAC" : "ffmpeg_aac";
+		if (advanced) {
+			const char *selectedAudio = config_get_string(config, section, slot == Stream ? "AudioEncoder" : "RecAudioEncoder");
+			const char *codec = obs_get_encoder_codec(selectedAudio);
+			const char *supported = obs_output_get_supported_audio_codecs(output);
+			if (codec && (!supported || std::string_view(supported).find(codec) != std::string_view::npos))
+				audioId = selectedAudio;
+		}
 		for (size_t track = 0, index = 0; track < MAX_AUDIO_MIXES; track++) {
 			if (!(tracks & (1ULL << track)))
 				continue;
-			if (advanced)
+			if (advanced) {
 				obs_data_set_int(audioSettings, "bitrate", config_get_uint(config, "AdvOut",
 					("Track" + std::to_string(track + 1) + "Bitrate").c_str()));
+				if (slot == Stream && applyServiceSettings)
+					obs_service_apply_encoder_settings(service, nullptr, audioSettings);
+			}
 			OBSEncoderAutoRelease audio = obs_audio_encoder_create(audioId, id, audioSettings, track, NULL);
 			if (!audio)
 				return;
@@ -389,6 +464,12 @@ class IOSFrontend final : public obs_frontend_callbacks {
 		connectOutput(output, slot);
 		if (!obs_output_start(output))
 			uiMessage(@"OutputError", @{@"message": @(obs_output_get_last_error(output) ?: "")});
+		else if (slot == Stream) {
+			if (config_get_bool(user.get(), "BasicWindow", "RecordWhenStreaming"))
+				startOutput(Recording);
+			if (config_get_bool(user.get(), "BasicWindow", "ReplayBufferWhileStreaming"))
+				startOutput(Replay);
+		}
 	}
 
 	obs_output_t *getOutput(Slot slot)
@@ -478,10 +559,35 @@ class IOSFrontend final : public obs_frontend_callbacks {
 		if (strcmp(layout, "7.1") == 0) speakers = SPEAKERS_7POINT1;
 		obs_audio_info audio = {(uint32_t)config_get_uint(config, "Audio", "SampleRate"), speakers};
 		obs_audio_info current = {};
-		if (!obs_get_audio_info(&current) || current.samples_per_sec != audio.samples_per_sec || current.speakers != speakers)
-			obs_reset_audio(&audio);
+		if (!obs_get_audio_info(&current) || current.samples_per_sec != audio.samples_per_sec || current.speakers != speakers) {
+			if (obs_reset_audio(&audio))
+				obs_reset_audio_monitoring();
+		}
 		const char *monitor = config_get_string(config, "Audio", "MonitoringDeviceId");
 		obs_set_audio_monitoring_device(monitor, monitor);
+	}
+
+	void applyMicInputs()
+	{
+		for (int index = 1; index <= 4; ++index) {
+			const auto key = "AuxDevice" + std::to_string(index);
+			const char *selected = config_get_string(profileConfig(), "Audio", key.c_str());
+			if (!selected || !*selected) {
+				obs_set_output_source(index, nullptr);
+				continue;
+			}
+			const auto label = "Basic.Settings.Audio.AuxDevice" + (index == 1 ? "" : std::to_string(index));
+			OBSDataAutoRelease settings = obs_data_create();
+			obs_data_set_string(settings, "device_id", selected);
+			OBSSourceAutoRelease known = obs_get_output_source(index);
+			if (known) {
+				obs_source_update(known, settings);
+			} else {
+				OBSSourceAutoRelease mic = obs_source_create_private("ios_audio_input",
+					obs_frontend_get_locale_string(label.c_str()), settings);
+				obs_set_output_source(index, mic);
+			}
+		}
 	}
 
 public:
@@ -491,6 +597,12 @@ public:
 		reloadLocale(locale);
 		if (!user || !app)
 			return;
+		config_set_default_bool(user.get(), "General", "ConfirmOnExit", true);
+		config_set_default_bool(user.get(), "BasicWindow", "SnappingEnabled", true);
+		config_set_default_bool(user.get(), "BasicWindow", "ScreenSnapping", true);
+		config_set_default_bool(user.get(), "BasicWindow", "CenterSnapping", true);
+		config_set_default_bool(user.get(), "BasicWindow", "SourceSnapping", true);
+		config_set_default_double(user.get(), "BasicWindow", "SnapDistance", 10);
 		const char *lastProfile = config_get_string(user.get(), "Basic", "ProfileDir");
 		const char *lastCollection = config_get_string(user.get(), "Basic", "SceneCollectionFile");
 		const char *untitled = obs_frontend_get_locale_string("Untitled");
@@ -509,8 +621,29 @@ public:
 		obs_frontend_reset_video();
 		loadService();
 		loadCollection();
+		applyMicInputs();
 		loadHotkeys();
 		obs_frontend_save();
+	}
+
+	void releaseSources()
+	{
+		std::lock_guard lock(stateMutex);
+		obs_frontend_save();
+		on_event(OBS_FRONTEND_EVENT_EXIT);
+		for (int channel = 0; channel <= 4; channel++)
+			obs_set_output_source(channel, nullptr);
+		for (auto &output : outputs)
+			output = nullptr;
+		program = nullptr;
+		preview = nullptr;
+		transition = nullptr;
+		copiedItem = nullptr;
+		transitions.clear();
+		scenes.clear();
+		sources.clear();
+		canvases.clear();
+		service = nullptr;
 	}
 
 	void reloadLocale(const char *locale)
@@ -522,6 +655,37 @@ public:
 		translations.reset(text_lookup_create((path / "en-US.ini").c_str()));
 		if (translations && strcmp(locale, "en-US") != 0)
 			text_lookup_add(translations.get(), (path / (std::string(locale) + ".ini")).c_str());
+	}
+
+	void applyAudio()
+	{
+		std::lock_guard lock(stateMutex);
+		if (!isOutputActive()) {
+			resetAudio();
+			applyMicInputs();
+		}
+	}
+
+	void checkRecordingCapacity()
+	{
+		std::lock_guard lock(stateMutex);
+		if (!recordingPath.empty() && obs_output_active(outputs[Recording]) &&
+		    !hasRecordingCapacity(fs::path(recordingPath).parent_path().string()))
+			stopOutput(Recording);
+	}
+
+	void quickTransition(obs_source_t *value)
+	{
+		std::lock_guard lock(stateMutex);
+		if (!studio || !preview || !value)
+			return;
+		auto saved = transition;
+		transition = value;
+		++deferSave;
+		obs_frontend_set_current_scene(preview);
+		--deferSave;
+		transition = saved;
+		obs_frontend_save();
 	}
 
 	obs_source_t *addScene(const char *name)
@@ -569,6 +733,112 @@ public:
 		on_event(OBS_FRONTEND_EVENT_SCENE_LIST_CHANGED);
 	}
 
+	const fs::path configurationPath(bool isProfile, const char *name = nullptr)
+	{
+		std::lock_guard lock(stateMutex);
+		return isProfile ? profilePath(name ? name : profile.c_str()) : collectionPath(name ? name : collection.c_str());
+	}
+
+	bool renameConfiguration(bool isProfile, const char *name)
+	{
+		std::lock_guard lock(stateMutex);
+		if (!validName(name) || isOutputActive())
+			return false;
+		std::error_code error;
+		auto oldPath = configurationPath(isProfile);
+		auto newPath = configurationPath(isProfile, name);
+		if (fs::exists(newPath, error))
+			return false;
+		obs_frontend_save();
+		fs::rename(oldPath, newPath, error);
+		if (error)
+			return false;
+		if (isProfile) {
+			profileConfigs.erase(name);
+			if (!openProfile(name)) {
+				fs::rename(newPath, oldPath, error);
+				return false;
+			}
+			config_set_string(profileConfig(), "General", "Name", name);
+		} else {
+			collection = name;
+		}
+		obs_frontend_save();
+		on_event(isProfile ? OBS_FRONTEND_EVENT_PROFILE_LIST_CHANGED : OBS_FRONTEND_EVENT_SCENE_COLLECTION_LIST_CHANGED);
+		return true;
+	}
+
+	bool deleteConfiguration(bool isProfile, const char *name)
+	{
+		std::lock_guard lock(stateMutex);
+		if (!validName(name) || isOutputActive())
+			return false;
+		std::string removed = name;
+		const auto &current = isProfile ? profile : collection;
+		if (removed == current) {
+			std::vector<std::string> names;
+			if (isProfile)
+				obs_frontend_get_profiles(names);
+			else
+				obs_frontend_get_scene_collections(names);
+			auto next = std::find_if(names.begin(), names.end(), [&](const auto &item) { return item != removed; });
+			if (next == names.end())
+				return false;
+			if (isProfile)
+				obs_frontend_set_current_profile(next->c_str());
+			else
+				obs_frontend_set_current_scene_collection(next->c_str());
+			if (removed == current)
+				return false;
+		}
+		std::error_code error;
+		if (fs::remove_all(configurationPath(isProfile, removed.c_str()), error) == 0 || error)
+			return false;
+		if (isProfile)
+			profileConfigs.erase(removed);
+		on_event(isProfile ? OBS_FRONTEND_EVENT_PROFILE_LIST_CHANGED : OBS_FRONTEND_EVENT_SCENE_COLLECTION_LIST_CHANGED);
+		return true;
+	}
+
+	bool importConfiguration(bool isProfile, const char *path, const char *name)
+	{
+		std::lock_guard lock(stateMutex);
+		if (!validName(name) || !path || !*path || isOutputActive())
+			return false;
+		auto target = configurationPath(isProfile, name);
+		std::error_code error;
+		if (fs::exists(target, error))
+			return false;
+		if (isProfile) {
+			const fs::path source(path);
+			if (!fs::is_regular_file(source / "basic.ini", error) || !fs::create_directory(target, error))
+				return false;
+			for (const char *file : {"basic.ini", "service.json", "streamEncoder.json", "recordEncoder.json"}) {
+				if (fs::is_regular_file(source / file, error)) {
+					fs::copy_file(source / file, target / file, error);
+					if (error) {
+						fs::remove_all(target, error);
+						return false;
+					}
+				}
+			}
+			obs_frontend_set_current_profile(name);
+			config_set_string(profileConfig(), "General", "Name", name);
+		} else {
+			OBSDataAutoRelease data = obs_data_create_from_json_file(path);
+			OBSDataArrayAutoRelease items = obs_data_get_array(data, "sources");
+			if (!items)
+				return false;
+			obs_data_set_string(data, "name", name);
+			if (!obs_data_save_json_safe(data, target.c_str(), "tmp", "bak"))
+				return false;
+			obs_frontend_set_current_scene_collection(name);
+		}
+		obs_frontend_save();
+		on_event(isProfile ? OBS_FRONTEND_EVENT_PROFILE_LIST_CHANGED : OBS_FRONTEND_EVENT_SCENE_COLLECTION_LIST_CHANGED);
+		return true;
+	}
+
 	void *obs_frontend_get_main_window() override { return nullptr; }
 	void *obs_frontend_get_main_window_handle() override { return nullptr; }
 	void *obs_frontend_get_system_tray() override { return nullptr; }
@@ -587,13 +857,33 @@ public:
 		std::lock_guard lock(stateMutex);
 		if (!obs_scene_from_source(scene) || program == scene)
 			return;
-		program = scene;
-		if (transition) {
-			if (!obs_transition_start(transition, OBS_TRANSITION_MODE_AUTO, duration, scene))
-				obs_transition_set(transition, scene);
+		auto chosen = transition;
+		int milliseconds = duration;
+		OBSDataAutoRelease settings = obs_source_get_private_settings(scene);
+		const char *overrideName = obs_data_get_string(settings, "transition");
+		if (overrideName && *overrideName) {
+			for (const auto &candidate : transitions) {
+				if (strcmp(obs_source_get_name(candidate), overrideName) == 0) {
+					chosen = candidate;
+					const int value = (int)obs_data_get_int(settings, "transition_duration");
+					if (value > 0)
+						milliseconds = value;
+					break;
+				}
+			}
+		}
+		if (chosen) {
+			OBSSourceAutoRelease output = obs_get_output_source(0);
+			if (output != chosen) {
+				obs_transition_set(chosen, program);
+				obs_set_output_source(0, chosen);
+			}
+			if (!obs_transition_start(chosen, OBS_TRANSITION_MODE_AUTO, milliseconds, scene))
+				obs_transition_set(chosen, scene);
 		} else {
 			obs_set_output_source(0, scene);
 		}
+		program = scene;
 		if (!studio)
 			preview = scene;
 		obs_frontend_save();
@@ -635,7 +925,11 @@ public:
 		if (!studio || !transition || program == preview)
 			return;
 		if (tbarPosition == 0)
+		{
+			obs_transition_set(transition, program);
+			obs_set_output_source(0, transition);
 			obs_transition_start(transition, OBS_TRANSITION_MODE_MANUAL, duration, preview);
+		}
 		tbarPosition = std::clamp(value, 0, 1024);
 		obs_transition_set_manual_time(transition, tbarPosition / 1024.0f);
 		on_event(OBS_FRONTEND_EVENT_TBAR_VALUE_CHANGED);
@@ -685,7 +979,10 @@ public:
 			obs_source_remove(source);
 		program = nullptr;
 		preview = nullptr;
+		copiedItem = nullptr;
 		transition = nullptr;
+		undoActions.clear();
+		undoPosition = 0;
 		scenes.clear();
 		sources.clear();
 		transitions.clear();
@@ -737,6 +1034,7 @@ public:
 			loadService();
 			loadHotkeys();
 			resetAudio();
+			applyMicInputs();
 			obs_frontend_reset_video();
 			obs_frontend_save();
 			on_event(OBS_FRONTEND_EVENT_PROFILE_CHANGED);
@@ -775,7 +1073,17 @@ public:
 	}
 
 	void obs_frontend_streaming_start() override { startOutput(Stream); }
-	void obs_frontend_streaming_stop() override { stopOutput(Stream); }
+	void obs_frontend_streaming_stop() override
+	{
+		std::lock_guard lock(stateMutex);
+		stopOutput(Stream);
+		if (config_get_bool(user.get(), "BasicWindow", "RecordWhenStreaming") &&
+		    !config_get_bool(user.get(), "BasicWindow", "KeepRecordingWhenStreamStops"))
+			stopOutput(Recording);
+		if (config_get_bool(user.get(), "BasicWindow", "ReplayBufferWhileStreaming") &&
+		    !config_get_bool(user.get(), "BasicWindow", "KeepReplayBufferStreamStops"))
+			stopOutput(Replay);
+	}
 	bool obs_frontend_streaming_active() override { return active(Stream); }
 	void obs_frontend_recording_start() override { startOutput(Recording); }
 	void obs_frontend_recording_stop() override { stopOutput(Recording); }
@@ -1074,7 +1382,11 @@ public:
 		if (item)
 			uiMessage(@"Transform", @{@"item": @(obs_sceneitem_get_id(item))});
 	}
-	char *obs_frontend_get_current_record_output_path() override { return bstrdup(recordingDirectory().c_str()); }
+	char *obs_frontend_get_current_record_output_path() override
+	{
+		std::lock_guard lock(stateMutex);
+		return bstrdup(configuredRecordingDirectory().c_str());
+	}
 	bool obs_frontend_is_theme_dark() override { return true; }
 	char *obs_frontend_get_last_recording() override { std::lock_guard lock(stateMutex); return bstrdup(recordingPath.c_str()); }
 	char *obs_frontend_get_last_screenshot() override { std::lock_guard lock(stateMutex); return bstrdup(screenshotPath.c_str()); }
@@ -1089,7 +1401,39 @@ public:
 		calldata_free(&data);
 		return path;
 	}
-	void obs_frontend_add_undo_redo_action(const char *, undo_redo_cb, undo_redo_cb, const char *, const char *, bool) override {}
+	void obs_frontend_add_undo_redo_action(const char *name, undo_redo_cb undo, undo_redo_cb redo,
+					      const char *before, const char *after, bool repeatable) override
+	{
+		std::lock_guard lock(stateMutex);
+		if (!undo || !redo || !before || !after || strcmp(before, after) == 0)
+			return;
+		undoActions.resize(undoPosition);
+		if (repeatable && !undoActions.empty() && undoActions.back().name == name) {
+			undoActions.back().after = after;
+		} else {
+			undoActions.push_back({name, before, after, undo, redo});
+			if (undoActions.size() > 100)
+				undoActions.erase(undoActions.begin());
+		}
+		undoPosition = undoActions.size();
+	}
+	bool canUndo(bool redo)
+	{
+		std::lock_guard lock(stateMutex);
+		return redo ? undoPosition < undoActions.size() : undoPosition > 0;
+	}
+	void undo(bool redo)
+	{
+		std::lock_guard lock(stateMutex);
+		if (!canUndo(redo))
+			return;
+		const auto action = undoActions[redo ? undoPosition++ : --undoPosition];
+		if (redo)
+			action.redo(action.after.c_str());
+		else
+			action.undo(action.before.c_str());
+		obs_frontend_save();
+	}
 	obs_canvas_t *obs_frontend_add_canvas(const char *name, obs_video_info *video, int flags) override
 	{
 		std::lock_guard lock(stateMutex);
@@ -1171,8 +1515,85 @@ void obs_app_frontend_close(void)
 	obs_frontend_set_callbacks_internal(nullptr);
 	frontend = nullptr;
 }
+void obs_app_frontend_release_sources(void) { frontend->releaseSources(); }
 
 obs_source_t *obs_app_create_scene(const char *name) { return frontend->addScene(name); }
 void obs_app_remove_scene(obs_source_t *scene) { frontend->removeScene(scene); }
 void obs_app_move_scene(obs_source_t *scene, int position) { frontend->moveScene(scene, position); }
 void obs_app_frontend_reload_locale(const char *locale) { frontend->reloadLocale(locale); }
+void obs_app_frontend_apply_audio(void) { frontend->applyAudio(); }
+void obs_app_check_recording_capacity(void) { frontend->checkRecordingCapacity(); }
+bool obs_app_can_undo(bool redo) { return frontend->canUndo(redo); }
+void obs_app_undo(bool redo) { frontend->undo(redo); }
+void obs_app_quick_transition(obs_source_t *transition) { frontend->quickTransition(transition); }
+bool obs_app_rename_configuration(bool profile, const char *name) { return frontend->renameConfiguration(profile, name); }
+bool obs_app_delete_configuration(bool profile, const char *name) { return frontend->deleteConfiguration(profile, name); }
+bool obs_app_duplicate_collection(const char *name)
+{
+	obs_frontend_save();
+	return frontend->importConfiguration(false, frontend->configurationPath(false).c_str(), name);
+}
+bool obs_app_import_configuration(bool profile, const char *path, const char *name)
+{
+	return frontend->importConfiguration(profile, path, name);
+}
+char *obs_app_configuration_path(bool profile) { return bstrdup(frontend->configurationPath(profile).c_str()); }
+
+/* The desktop scene undo saves dependent sources followed by the scene, then
+ * restores all settings before resolving scene items in a second pass. */
+static void snapshot_source(obs_source_t *source, obs_data_array_t *array);
+
+static bool snapshot_item(obs_scene_t *, obs_sceneitem_t *item, void *data)
+{
+	auto *array = static_cast<obs_data_array_t *>(data);
+	snapshot_source(obs_sceneitem_get_source(item), array);
+	return true;
+}
+
+static void snapshot_source(obs_source_t *source, obs_data_array_t *array)
+{
+	if (auto *scene = obs_group_from_source(source))
+		obs_scene_enum_items(scene, snapshot_item, array);
+	OBSDataAutoRelease saved = obs_save_source(source);
+	obs_data_array_push_back(array, saved);
+}
+
+obs_data_t *obs_app_snapshot_scene(obs_source_t *source)
+{
+	auto *scene = obs_scene_from_source(source);
+	if (!scene)
+		return nullptr;
+	OBSDataArrayAutoRelease items = obs_data_array_create();
+	obs_scene_enum_items(scene, snapshot_item, items);
+	snapshot_source(source, items);
+	auto *data = obs_data_create();
+	obs_data_set_array(data, "array", items);
+	return data;
+}
+
+void obs_app_restore_scene(const char *json)
+{
+	OBSDataAutoRelease data = obs_data_create_from_json(json);
+	OBSDataArrayAutoRelease entries = obs_data_get_array(data, "array");
+	std::vector<OBSSource> loaded, existing;
+	for (size_t index = 0; index < obs_data_array_count(entries); index++) {
+		OBSDataAutoRelease saved = obs_data_array_item(entries, index);
+		OBSSourceAutoRelease source = obs_get_source_by_uuid(obs_data_get_string(saved, "uuid"));
+		if (!source)
+			source = obs_load_source(saved);
+		if (!source)
+			continue;
+		loaded.emplace_back(source.Get());
+		obs_source_set_name(source, obs_data_get_string(saved, "name"));
+		if (auto *scene = obs_group_or_scene_from_source(source)) {
+			obs_scene_enum_items(scene, [](obs_scene_t *, obs_sceneitem_t *item, void *data) {
+				static_cast<std::vector<OBSSource> *>(data)->emplace_back(obs_sceneitem_get_source(item));
+				return true;
+			}, &existing);
+			OBSDataAutoRelease settings = obs_data_get_obj(saved, "settings");
+			obs_source_update(source, settings);
+		}
+	}
+	for (auto &source : loaded)
+		obs_source_load2(source);
+}

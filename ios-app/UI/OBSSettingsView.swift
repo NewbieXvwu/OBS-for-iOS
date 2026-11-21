@@ -12,6 +12,7 @@ struct OBSSettingsView: View {
     @State private var generation = 0
     @State private var serviceType = ""
     @State private var serviceEditor: OBSPropertyEditor?
+    @AppStorage("OBS.PluginDirectory") private var pluginDirectory = ""
 
     private enum Tab: String, CaseIterable {
         case general = "General", stream = "Stream", output = "Output", audio = "Audio"
@@ -64,9 +65,23 @@ struct OBSSettingsView: View {
                 openService(serviceType, current: service)
             }
         }
+        .task {
+            guard ProcessInfo.processInfo.arguments.contains("--workspace-smoke") else { return }
+            for page in Tab.allCases {
+                tab = page
+                try? await Task.sleep(for: .milliseconds(300))
+                let key = "Basic.Settings." + page.rawValue
+                guard OBSLocale.str(key) != key else {
+                    print("OBS workspace smoke: missing \(key)")
+                    return
+                }
+                print("OBS workspace smoke: Settings.\(page.rawValue)")
+            }
+            print("OBS workspace smoke: complete")
+        }
     }
 
-    private var general: some View {
+    @ViewBuilder private var general: some View {
         Section(label("General")) {
             Picker(label("General.Language"), selection: $locale.selection) {
                 Text(OBSLocale.str("Default")).tag("")
@@ -82,12 +97,28 @@ struct OBSSettingsView: View {
             Toggle(label("General.KeepRecordingWhenStreamStops"), isOn: flag(user, "BasicWindow", "KeepRecordingWhenStreamStops"))
             Toggle(label("General.ReplayBufferWhileStreaming"), isOn: flag(user, "BasicWindow", "ReplayBufferWhileStreaming"))
             Toggle(label("General.KeepReplayBufferStreamStops"), isOn: flag(user, "BasicWindow", "KeepReplayBufferStreamStops"))
+            Toggle(label("Advanced.General.ConfirmOnExit"), isOn: flag(user, "General", "ConfirmOnExit"))
+            Toggle(label("Output.Reconnect"), isOn: flag(profile, "Output", "Reconnect")).disabled(active)
+        }
+        Section(label("General.Snapping")) {
+            Toggle(label("General.Snapping"), isOn: flag(user, "BasicWindow", "SnappingEnabled"))
+            Toggle(label("General.ScreenSnapping"), isOn: flag(user, "BasicWindow", "ScreenSnapping"))
+            Toggle(label("General.CenterSnapping"), isOn: flag(user, "BasicWindow", "CenterSnapping"))
+            Toggle(label("General.SourceSnapping"), isOn: flag(user, "BasicWindow", "SourceSnapping"))
+            LabeledContent(label("General.SnapDistance")) {
+                TextField(label("General.SnapDistance"), value: Binding(get: {
+                    config_get_double(user, "BasicWindow", "SnapDistance")
+                }, set: {
+                    config_set_double(user, "BasicWindow", "SnapDistance", min(max($0, 0), 100))
+                    save(user)
+                }), format: .number).keyboardType(.decimalPad).multilineTextAlignment(.trailing)
+            }
         }
     }
 
     private var stream: some View {
         Section(label("Stream")) {
-            Picker(OBSLocale.str("Service"), selection: Binding(get: { serviceType }, set: { type in
+            Picker(OBSLocale.str("Basic.AutoConfig.StreamPage.Service"), selection: Binding(get: { serviceType }, set: { type in
                 serviceType = type
                 openService(type, current: nil)
             })) {
@@ -122,7 +153,8 @@ struct OBSSettingsView: View {
         let formats = [("hybrid_mp4", label("Output.Format.hMP4")), ("hybrid_mov", label("Output.Format.hMOV"))]
         let extraFormats = [("mkv", label("Output.Format.MKV")), ("flv", label("Output.Format.FLV")),
                             ("mpegts", label("Output.Format.TS")), ("mp4", label("Output.Format.MP4")),
-                            ("mov", label("Output.Format.MOV"))]
+                            ("mov", label("Output.Format.MOV")), ("hls", label("Output.Format.HLS")),
+                            ("fragmented_mp4", label("Output.Format.fMP4")), ("fragmented_mov", label("Output.Format.fMOV"))]
         return Group {
             choice(label("Output.Mode"), profile, "Output", "Mode",
                    [("Simple", label("Output.Mode.Simple")), ("Advanced", label("Output.Mode.Adv"))])
@@ -134,6 +166,7 @@ struct OBSSettingsView: View {
             if outputTab == .streaming {
                 encoder(section, advanced ? "Encoder" : "StreamEncoder", record: false)
                 if advanced {
+                    audioEncoder("AudioEncoder")
                     Picker(label("Output.Simple.RecAudioTrack"), selection: quantity(profile, section, "TrackIndex", 1...6)) {
                         ForEach(1...6, id: \.self) { Text(String($0)).tag(UInt64($0)) }
                     }
@@ -146,7 +179,14 @@ struct OBSSettingsView: View {
                     .textInputAutocapitalization(.never).autocorrectionDisabled()
                 choice(label("Output.Format"), profile, section, "RecFormat2",
                        obs_ios_get_capabilities() & UInt32(OBS_IOS_CAP_SPAWN_MUXER.rawValue) != 0 ? formats + extraFormats : formats)
-                encoder(section, "RecEncoder", record: true)
+                if !advanced {
+                    choice(label("Output.Simple.RecordingQuality"), profile, section, "RecQuality",
+                           ["Stream", "Small", "HQ"].map { ($0, label("Output.Simple.RecordingQuality." + $0)) })
+                }
+                if advanced || configText(profile, section, "RecQuality") != "Stream" {
+                    encoder(section, "RecEncoder", record: true)
+                }
+                if advanced { audioEncoder("RecAudioEncoder") }
                 tracks(section)
                 if advanced && obs_ios_get_capabilities() & UInt32(OBS_IOS_CAP_SPAWN_MUXER.rawValue) != 0 {
                     TextField(label("Output.Adv.FFmpeg.MuxerSettings"), text: string(profile, section, "RecMuxerCustom"))
@@ -192,6 +232,14 @@ struct OBSSettingsView: View {
         }
     }
 
+    private func audioEncoder(_ key: String) -> some View {
+        let encoders = registeredKinds(obs_enum_encoder_types, obs_encoder_get_display_name).filter {
+            obs_get_encoder_type($0.id) == OBS_ENCODER_AUDIO
+        }
+        return choice(label("Output.Encoder.Audio"), profile, "AdvOut", key,
+                      [("none", OBSLocale.str("Default"))] + encoders.map { ($0.id, $0.name) })
+    }
+
     @ViewBuilder private func encoder(_ section: String, _ key: String, record: Bool) -> some View {
         let value = configText(profile, section, key)
         let id = value == "x264" ? "obs_x264" : value
@@ -224,16 +272,28 @@ struct OBSSettingsView: View {
                 ForEach(0..<4, id: \.self) { index in
                     let suffix = index == 0 ? "" : String(index + 1)
                     choice(label("Audio.AuxDevice" + suffix), profile, "Audio", "AuxDevice\(index + 1)",
-                           [("", OBSLocale.str("Disabled")), ("default", OBSLocale.str("Default"))] +
+                           [("", label("Audio.Disabled")), ("default", OBSLocale.str("Default"))] +
                            (session.availableInputs ?? []).map { ($0.uid, $0.portName) })
                 }
                 choice(label("Advanced.Audio.MonitoringDevice"), profile, "Audio", "MonitoringDeviceId",
                        [("default", label("Advanced.Audio.MonitoringDevice.Default"))] + outputs.map { ($0.uid, $0.portName) })
             }
             Section(label("Audio.Meters")) {
-                choice(label("Audio.MeterDecayRate"), profile, "Audio", "MeterDecay",
-                       ["Fast", "Medium", "Slow"].map { ($0, label("Audio.MeterDecayRate." + $0)) })
-                Toggle(label("Audio.PeakMeterType.TruePeak"), isOn: flag(profile, "Audio", "TruePeak"))
+                Picker(label("Audio.MeterDecayRate"), selection: Binding(get: {
+                    config_get_double(profile, "Audio", "MeterDecayRate")
+                }, set: {
+                    config_set_double(profile, "Audio", "MeterDecayRate", $0)
+                    save(profile)
+                })) {
+                    Text(label("Audio.MeterDecayRate.Fast")).tag(23.53)
+                    Text(label("Audio.MeterDecayRate.Medium")).tag(11.76)
+                    Text(label("Audio.MeterDecayRate.Slow")).tag(8.57)
+                }
+                Picker(label("Audio.PeakMeterType"), selection: quantity(profile, "Audio", "PeakMeterType", 0...1)) {
+                    Text(label("Audio.PeakMeterType.SamplePeak")).tag(UInt64(0))
+                    Text(label("Audio.PeakMeterType.TruePeak")).tag(UInt64(1))
+                }
+                Button(OBSLocale.str("Apply")) { obs_app_frontend_apply_audio() }
             }
         }.disabled(active)
     }
@@ -297,6 +357,10 @@ struct OBSSettingsView: View {
                 number(label("Output.RetryDelay"), profile, "Output", "RetryDelay", 1...120)
                 number(label("Output.MaxRetries"), profile, "Output", "MaxRetries", 0...100)
                 Toggle(label("Output.DynamicBitrate"), isOn: flag(profile, "Output", "DynamicBitrate"))
+            }
+            if obs_ios_get_capabilities() & UInt32(OBS_IOS_CAP_DYNAMIC_PLUGIN.rawValue) != 0 {
+                TextField(OBSLocale.str("PluginManager"), text: $pluginDirectory)
+                    .textInputAutocapitalization(.never).autocorrectionDisabled()
             }
         }.disabled(active)
     }

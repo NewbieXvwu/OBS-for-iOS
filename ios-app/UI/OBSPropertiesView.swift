@@ -110,7 +110,7 @@ private struct OBSPropertyRow<Children: View>: View {
                     }
                 } catch { importError = error.localizedDescription }
             }
-            .alert(OBSLocale.str("Error"), isPresented: Binding(
+            .alert(OBSLocale.str("PluginManager.Status.Error"), isPresented: Binding(
                 get: { importError != nil }, set: { if !$0 { importError = nil } })) {
                     Button(OBSLocale.str("OK"), role: .cancel) { importError = nil }
                 } message: { Text(importError ?? "") }
@@ -293,7 +293,7 @@ private struct OBSPropertyRow<Children: View>: View {
                 if !families.contains(face.wrappedValue) { Text(face.wrappedValue).tag(face.wrappedValue) }
                 ForEach(families, id: \.self) { Text($0).tag($0) }
             }
-            Picker(OBSLocale.str("FontStyle"), selection: style) {
+            Picker(OBSLocale.str("Basic.Settings.Appearance.General.Variant"), selection: style) {
                 Text(OBSLocale.str("Default")).tag("")
                 let styles = UIFont.fontNames(forFamilyName: face.wrappedValue)
                 if !style.wrappedValue.isEmpty && !styles.contains(style.wrappedValue) {
@@ -301,7 +301,7 @@ private struct OBSPropertyRow<Children: View>: View {
                 }
                 ForEach(styles, id: \.self) { Text($0).tag($0) }
             }
-            TextField(OBSLocale.str("FontSize"), value: size, format: .number)
+            TextField(OBSLocale.str("Basic.TransformWindow.Size"), value: size, format: .number)
                 .keyboardType(.numberPad)
         }
     }
@@ -350,6 +350,16 @@ private struct OBSPropertyRow<Children: View>: View {
                         }
                     })).autocorrectionDisabled()
                     Button {
+                        moveItem(index, to: index - 1)
+                    } label: {
+                        Label(OBSLocale.menu("Basic.MainMenu.Edit.Order.MoveUp"), systemImage: "chevron.up")
+                    }.labelStyle(.iconOnly).buttonStyle(.borderless).disabled(index == 0)
+                    Button {
+                        moveItem(index, to: index + 1)
+                    } label: {
+                        Label(OBSLocale.menu("Basic.MainMenu.Edit.Order.MoveDown"), systemImage: "chevron.down")
+                    }.labelStyle(.iconOnly).buttonStyle(.borderless).disabled(index + 1 == count)
+                    Button {
                         changeArray { obs_data_array_erase($0, index) }
                     } label: {
                         Label(OBSLocale.str("Remove"), systemImage: "minus.circle")
@@ -364,6 +374,15 @@ private struct OBSPropertyRow<Children: View>: View {
                     Button(OBSLocale.str("Browse")) { pickingFile = true }.buttonStyle(.borderless)
                 }
             }
+        }
+    }
+
+    private func moveItem(_ index: Int, to destination: Int) {
+        changeArray { array in
+            guard let item = obs_data_array_item(array, index) else { return }
+            obs_data_array_erase(array, index)
+            obs_data_array_insert(array, destination, item)
+            obs_data_array_release(item)
         }
     }
 
@@ -391,7 +410,7 @@ private struct OBSPropertyRow<Children: View>: View {
         })
         return VStack(alignment: .leading) {
             Picker(title, selection: custom) {
-                Text(OBSLocale.str("Custom")).tag("")
+                Text(OBSLocale.str("Basic.Settings.Accessibility.ColorOverrides.Preset.Custom")).tag("")
                 ForEach(0..<obs_property_frame_rate_options_count(property), id: \.self) { index in
                     Text(String(cString: obs_property_frame_rate_option_description(property, index)))
                         .tag(String(cString: obs_property_frame_rate_option_name(property, index)))

@@ -1,5 +1,20 @@
 get_property(modules GLOBAL PROPERTY OBS_IOS_STATIC_LIBRARIES)
 get_property(module_data GLOBAL PROPERTY OBS_IOS_MODULE_DATA)
+if(OBS_IOS_PRIVILEGED)
+  set(OBS_PRIVILEGED_INFO [[
+  <key>NSScreenCaptureUsageDescription</key>
+  <string>OBS uses the display you select as a video source.</string>
+  <key>UIBackgroundModes</key>
+  <array>
+    <string>processing</string>
+    <string>screen-capture</string>
+  </array>
+  <key>BGTaskSchedulerPermittedIdentifiers</key>
+  <array>
+    <string>org.obsproject.studio.ios.rendering.*</string>
+  </array>
+  ]])
+endif()
 
 add_executable(OBSApp MACOSX_BUNDLE
   CoreBridge/OBSBridge.h
@@ -14,9 +29,18 @@ add_executable(OBSApp MACOSX_BUNDLE
   UI/OBSSettingsView.swift
   UI/OBSWebSocketSettingsView.swift
   UI/OBSHotkeys.swift
+  UI/OBSProjector.swift
 )
 if(ENABLE_WEBSOCKET)
   target_compile_definitions(OBSApp PRIVATE OBS_APP_WEBSOCKET=1)
+endif()
+if(OBS_IOS_PRIVILEGED)
+  target_sources(OBSApp PRIVATE HostPrivileged/HostPrivileged.m HostPrivileged/ScreenCapture.m)
+  set_source_files_properties(HostPrivileged/HostPrivileged.m HostPrivileged/ScreenCapture.m PROPERTIES
+    COMPILE_OPTIONS "-fobjc-arc")
+  target_compile_definitions(OBSApp PRIVATE OBS_APP_PRIVILEGED=1)
+  target_link_options(OBSApp PRIVATE "LINKER:-export_dynamic")
+  target_link_libraries(OBSApp PRIVATE "-framework BackgroundTasks" "-weak_framework ScreenCaptureKit" "-framework Security")
 endif()
 target_link_libraries(OBSApp PRIVATE OBS::libobs OBS::libobs-metal OBS::frontend-api ${modules}
   "-framework UIKit" "-framework SwiftUI" "-framework Metal" "-framework QuartzCore")

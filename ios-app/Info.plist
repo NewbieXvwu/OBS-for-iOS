@@ -20,8 +20,50 @@
 	<string>33.0.0</string>
 	<key>CFBundleVersion</key>
 	<string>1</string>
+	<key>NSCameraUsageDescription</key>
+	<string>OBS uses the camera for video capture sources.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>OBS uses the microphone for audio capture sources.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>OBS connects to local streaming endpoints and remote controllers.</string>
+	@OBS_PRIVILEGED_INFO@
+	<key>UIFileSharingEnabled</key>
+	<true/>
+	<key>LSSupportsOpeningDocumentsInPlace</key>
+	<true/>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoadsInWebContent</key>
+		<true/>
+	</dict>
 	<key>UILaunchScreen</key>
 	<dict/>
+	<key>UIApplicationSceneManifest</key>
+	<dict>
+		<key>UIApplicationSupportsMultipleScenes</key>
+		<true/>
+		<key>UISceneConfigurations</key>
+		<dict>
+			<key>UIWindowSceneSessionRoleApplication</key>
+			<array>
+				<dict>
+					<key>UISceneConfigurationName</key>
+					<string>OBS Workspace</string>
+					<key>UISceneDelegateClassName</key>
+					<string>OBSWorkspaceSceneDelegate</string>
+				</dict>
+			</array>
+			<key>UIWindowSceneSessionRoleExternalDisplayNonInteractive</key>
+			<array>
+				<dict>
+					<key>UISceneConfigurationName</key>
+					<string>OBS Projector</string>
+					<key>UISceneDelegateClassName</key>
+					<string>OBSProjectorSceneDelegate</string>
+				</dict>
+			</array>
+		</dict>
+	</dict>
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>

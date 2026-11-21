@@ -7,6 +7,7 @@
 #include <graphics/vec3.h>
 #include <graphics/matrix4.h>
 #include <util/base.h>
+#include <cstdlib>
 #include <ctime>
 #include <mutex>
 #include <string>
@@ -15,7 +16,19 @@
 extern "C" obs_data_t *obs_ios_websocket_settings(void);
 extern "C" void obs_ios_websocket_apply(obs_data_t *);
 extern "C" void obs_ios_websocket_disconnect(const char *);
+extern "C" void obs_ios_websocket_stop(dispatch_function_t);
 #endif
+#ifdef OBS_APP_PRIVILEGED
+extern "C" void obs_app_install_privileged_host(void);
+extern "C" void obs_app_privileged_background_job(bool);
+#endif
+
+void obs_app_update_background_job(bool active)
+{
+#ifdef OBS_APP_PRIVILEGED
+	obs_app_privileged_background_job(active);
+#endif
+}
 
 obs_data_t *obs_app_websocket_settings(void)
 {
@@ -43,6 +56,15 @@ void obs_app_websocket_disconnect(const char *address)
 static log_handler_t originalLogger;
 static void *originalLoggerData;
 static FILE *sessionLog;
+
+static void close_log()
+{
+	if (sessionLog) {
+		base_set_log_handler(originalLogger, originalLoggerData);
+		fclose(sessionLog);
+		sessionLog = nullptr;
+	}
+}
 
 static void app_log(int level, const char *format, va_list arguments, void *)
 {
@@ -74,8 +96,13 @@ bool obs_app_start(const char *locale, const char *configDirectory)
 			base_set_log_handler(app_log, NULL);
 		}
 	}
-	if (!obs_startup(locale, configDirectory, NULL))
+#ifdef OBS_APP_PRIVILEGED
+	obs_app_install_privileged_host();
+#endif
+	if (!obs_startup(locale, configDirectory, NULL)) {
+		close_log();
 		return false;
+	}
 
 	obs_audio_info audio = {.samples_per_sec = 48000, .speakers = SPEAKERS_STEREO};
 	obs_video_info video = {
@@ -97,11 +124,30 @@ bool obs_app_start(const char *locale, const char *configDirectory)
 	    !obs_app_frontend_open(configDirectory, locale) || !obs_load_core_modules()) {
 		obs_shutdown();
 		obs_app_frontend_close();
+		close_log();
 		return false;
 	}
 	obs_ios_load_extra_plugins();
 	obs_app_frontend_ready();
 	return true;
+}
+
+static void finish_quit(void *)
+{
+	obs_app_frontend_release_sources();
+	obs_shutdown();
+	obs_app_frontend_close();
+	close_log();
+	std::exit(EXIT_SUCCESS);
+}
+
+void obs_app_quit(void)
+{
+#ifdef OBS_APP_WEBSOCKET
+	obs_ios_websocket_stop(finish_quit);
+#else
+	finish_quit(nullptr);
+#endif
 }
 
 struct obs_app_display {
@@ -121,12 +167,16 @@ static void render_display(void *opaque, uint32_t width, uint32_t height)
 		std::lock_guard lock(display->sourceMutex);
 		source = obs_source_get_ref(display->source);
 	}
-	const double scale = fmin((double)width / video.base_width, (double)height / video.base_height);
-	const int targetWidth = (int)(video.base_width * scale);
-	const int targetHeight = (int)(video.base_height * scale);
+	const uint32_t sourceWidth = source ? obs_source_get_width(source) : 0;
+	const uint32_t sourceHeight = source ? obs_source_get_height(source) : 0;
+	const uint32_t contentWidth = sourceWidth ? sourceWidth : video.base_width;
+	const uint32_t contentHeight = sourceHeight ? sourceHeight : video.base_height;
+	const double scale = fmin((double)width / contentWidth, (double)height / contentHeight);
+	const int targetWidth = (int)(contentWidth * scale);
+	const int targetHeight = (int)(contentHeight * scale);
 	gs_viewport_push();
 	gs_projection_push();
-	gs_ortho(0, video.base_width, 0, video.base_height, -100, 100);
+	gs_ortho(0, contentWidth, 0, contentHeight, -100, 100);
 	gs_set_viewport(((int)width - targetWidth) / 2, ((int)height - targetHeight) / 2, targetWidth, targetHeight);
 	if (source)
 		obs_source_video_render(source);

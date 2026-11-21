@@ -4,10 +4,15 @@ import SwiftUI
 
 @MainActor
 struct SelectionOverlay: View {
+    private enum CropEdge { case top, left, bottom, right }
     let item: SceneItemReference
     let model: WorkspaceModel
     @State private var originalPosition: vec2?
+    @State private var originalBox: CGRect?
     @State private var originalScale: vec2?
+    @State private var originalCrop: obs_sceneitem_crop?
+    @State private var before: String?
+    @State private var liveBox: CGRect?
     @State private var originalWidth = 1.0
     @State private var originalHeight = 1.0
 
@@ -17,15 +22,29 @@ struct SelectionOverlay: View {
             let scale = min(geometry.size.width / video.width, geometry.size.height / video.height)
             let offset = CGPoint(x: (geometry.size.width - video.width * scale) / 2,
                                  y: (geometry.size.height - video.height * scale) / 2)
-            let bounds = itemBounds()
+            let bounds = liveBox ?? itemBounds()
             if item.visible && !bounds.isNull {
                 Rectangle()
                     .strokeBorder(.red, lineWidth: 2)
                     .overlay(alignment: .bottomTrailing) {
-                        if !item.locked {
+                        if !item.locked && model.editMode != .crop {
                             Rectangle().fill(.red).frame(width: 12, height: 12)
                                 .padding(5).contentShape(Rectangle())
                                 .gesture(sizeGesture(bounds: bounds, scale: scale))
+                        }
+                    }
+                    .overlay {
+                        if !item.locked && model.editMode == .crop {
+                            VStack {
+                                cropHandle(.top, scale: scale)
+                                Spacer()
+                                cropHandle(.bottom, scale: scale)
+                            }
+                            HStack {
+                                cropHandle(.left, scale: scale)
+                                Spacer()
+                                cropHandle(.right, scale: scale)
+                            }
                         }
                     }
                     .frame(width: max(1, bounds.width * scale), height: max(1, bounds.height * scale))
@@ -49,48 +68,128 @@ struct SelectionOverlay: View {
     }
 
     private func moveGesture(scale: CGFloat, video: CGSize) -> some Gesture {
-        DragGesture().onChanged { value in
+        DragGesture(coordinateSpace: .global).onChanged { value in
             guard scale > 0 else { return }
             model.withItem(item) { pointer in
                 var position = vec2()
                 if let originalPosition { position = originalPosition }
-                else { obs_sceneitem_get_pos(pointer, &position); originalPosition = position }
+                else {
+                    before = model.snapshot()
+                    obs_sceneitem_get_pos(pointer, &position)
+                    originalPosition = position
+                    originalBox = obs_app_item_bounds(pointer)
+                }
                 position.x += Float(value.translation.width / scale)
                 position.y += Float(value.translation.height / scale)
-                if abs(position.x) <= 10 { position.x = 0 }
-                if abs(position.y) <= 10 { position.y = 0 }
-                let box = obs_app_item_bounds(pointer)
-                if abs(CGFloat(position.x) + box.width - video.width) <= 10 {
-                    position.x = Float(video.width - box.width)
-                }
-                if abs(CGFloat(position.y) + box.height - video.height) <= 10 {
-                    position.y = Float(video.height - box.height)
+                if let originalBox, let originalPosition {
+                    let box = originalBox.offsetBy(dx: CGFloat(position.x - originalPosition.x),
+                                                   dy: CGFloat(position.y - originalPosition.y))
+                    let delta = snappingOffset(box, canvas: video)
+                    position.x += Float(delta.width)
+                    position.y += Float(delta.height)
                 }
                 obs_sceneitem_set_pos(pointer, &position)
+                liveBox = obs_app_item_bounds(pointer)
             }
-        }.onEnded { _ in originalPosition = nil; model.saveSources() }
+        }.onEnded { _ in originalPosition = nil; originalBox = nil; finish() }
+    }
+
+    private func snappingOffset(_ box: CGRect, canvas: CGSize) -> CGSize {
+        let user = obs_frontend_get_user_config()
+        guard !box.isNull, config_get_bool(user, "BasicWindow", "SnappingEnabled") else { return .zero }
+        let distance = CGFloat(config_get_double(user, "BasicWindow", "SnapDistance"))
+        var x: [CGFloat] = [], y: [CGFloat] = []
+        if config_get_bool(user, "BasicWindow", "ScreenSnapping") {
+            x += [-box.minX, canvas.width - box.maxX]
+            y += [-box.minY, canvas.height - box.maxY]
+        }
+        if config_get_bool(user, "BasicWindow", "CenterSnapping") {
+            x.append(canvas.width / 2 - box.midX)
+            y.append(canvas.height / 2 - box.midY)
+        }
+        if config_get_bool(user, "BasicWindow", "SourceSnapping") {
+            for other in model.sources where other.id != item.id && other.depth == item.depth && other.visible {
+                model.withItem(other) { pointer in
+                    let frame = obs_app_item_bounds(pointer)
+                    if frame.minY < box.maxY && frame.maxY > box.minY {
+                        x += [frame.minX - box.maxX, frame.maxX - box.minX]
+                    }
+                    if frame.minX < box.maxX && frame.maxX > box.minX {
+                        y += [frame.minY - box.maxY, frame.maxY - box.minY]
+                    }
+                }
+            }
+        }
+        func nearest(_ options: [CGFloat]) -> CGFloat {
+            options.filter { abs($0) <= distance }.min { abs($0) < abs($1) } ?? 0
+        }
+        return CGSize(width: nearest(x), height: nearest(y))
     }
 
     private func sizeGesture(bounds: CGRect, scale: CGFloat) -> some Gesture {
-        DragGesture().onChanged { value in
+        DragGesture(coordinateSpace: .global).onChanged { value in
             guard scale > 0 else { return }
             model.withItem(item) { pointer in
                 var size = vec2()
                 if let originalScale { size = originalScale }
                 else {
                     obs_sceneitem_get_scale(pointer, &size)
+                    before = model.snapshot()
                     originalScale = size
                     originalWidth = max(bounds.width, 1)
                     originalHeight = max(bounds.height, 1)
                 }
                 let dx = value.translation.width / (scale * originalWidth)
                 let dy = value.translation.height / (scale * originalHeight)
-                let ratio = Float(max(0.01, 1 + (abs(dx) > abs(dy) ? dx : dy)))
-                size.x *= ratio
-                size.y *= ratio
+                if model.editMode == .stretch {
+                    size.x *= Float(max(0.01, 1 + dx))
+                    size.y *= Float(max(0.01, 1 + dy))
+                } else {
+                    let ratio = Float(max(0.01, 1 + (abs(dx) > abs(dy) ? dx : dy)))
+                    size.x *= ratio
+                    size.y *= ratio
+                }
                 obs_sceneitem_set_scale(pointer, &size)
+                liveBox = obs_app_item_bounds(pointer)
             }
-        }.onEnded { _ in originalScale = nil; model.saveSources() }
+        }.onEnded { _ in originalScale = nil; finish() }
+    }
+
+    private func cropHandle(_ edge: CropEdge, scale: CGFloat) -> some View {
+        Rectangle().fill(.red).frame(width: 12, height: 12).padding(5).contentShape(Rectangle())
+            .gesture(DragGesture(coordinateSpace: .global).onChanged { value in
+                guard scale > 0 else { return }
+                model.withItem(item) { pointer in
+                    var crop = obs_sceneitem_crop()
+                    if let originalCrop { crop = originalCrop }
+                    else {
+                        before = model.snapshot()
+                        obs_sceneitem_get_crop(pointer, &crop)
+                        originalCrop = crop
+                    }
+                    var sourceScale = vec2()
+                    obs_sceneitem_get_scale(pointer, &sourceScale)
+                    let x = Int32((value.translation.width / (scale * CGFloat(max(abs(sourceScale.x), 0.01)))).rounded())
+                    let y = Int32((value.translation.height / (scale * CGFloat(max(abs(sourceScale.y), 0.01)))).rounded())
+                    let source = obs_sceneitem_get_source(pointer)
+                    let width = Int32(obs_source_get_width(source))
+                    let height = Int32(obs_source_get_height(source))
+                    switch edge {
+                    case .left: crop.left = min(max(crop.left + x, 0), max(0, width - crop.right - 1))
+                    case .right: crop.right = min(max(crop.right - x, 0), max(0, width - crop.left - 1))
+                    case .top: crop.top = min(max(crop.top + y, 0), max(0, height - crop.bottom - 1))
+                    case .bottom: crop.bottom = min(max(crop.bottom - y, 0), max(0, height - crop.top - 1))
+                    }
+                    obs_sceneitem_set_crop(pointer, &crop)
+                    liveBox = obs_app_item_bounds(pointer)
+                }
+            }.onEnded { _ in originalCrop = nil; finish() })
+    }
+
+    private func finish() {
+        liveBox = nil
+        model.finishEdit("Undo.Transform", from: before)
+        before = nil
     }
 }
 
@@ -184,11 +283,54 @@ struct TransformView: View {
     }
 
     private func apply() {
+        let before = model.snapshot()
         model.withItem(item) { pointer in
             obs_sceneitem_set_info2(pointer, &transform)
             obs_sceneitem_set_crop(pointer, &crop)
         }
-        model.saveSources()
+        model.finishEdit("Undo.Transform", from: before, repeatable: true)
+    }
+}
+
+struct TransitionOverrideView: View {
+    let scene: SourceReference
+    let transitions: [SourceReference]
+    @State private var name = ""
+    @State private var duration = 300
+
+    var body: some View {
+        Form {
+            Picker(OBSLocale.str("Transition"), selection: $name) {
+                Text(OBSLocale.str("None")).tag("")
+                ForEach(transitions) { transition in Text(transition.name).tag(transition.name) }
+            }
+            Stepper(OBSLocale.str("Basic.TransitionDuration") + " \(duration) ms",
+                    value: $duration, in: 50...20_000, step: 50)
+                .disabled(name.isEmpty)
+            Button(OBSLocale.str("Apply")) {
+                withSettings { settings in
+                    obs_data_set_string(settings, "transition", name)
+                    obs_data_set_int(settings, "transition_duration", Int64(duration))
+                }
+                obs_frontend_save()
+            }
+        }
+        .navigationTitle(OBSLocale.str("TransitionOverride"))
+        .onAppear {
+            withSettings { settings in
+                obs_data_set_default_int(settings, "transition_duration", 300)
+                name = String(cString: obs_data_get_string(settings, "transition"))
+                duration = Int(obs_data_get_int(settings, "transition_duration"))
+            }
+        }
+    }
+
+    private func withSettings(_ action: (OpaquePointer) -> Void) {
+        withSource(scene.id) { source in
+            guard let settings = obs_source_get_private_settings(source) else { return }
+            defer { obs_data_release(settings) }
+            action(settings)
+        }
     }
 }
 
@@ -205,12 +347,20 @@ private func audioSources() -> [SourceReference] {
         }
         return true
     }, Unmanaged.passUnretained(collector).toOpaque())
+    for channel in 1...4 {
+        if let source = obs_get_output_source(UInt32(channel)) {
+            collector.values.append(SourceReference(source))
+            obs_source_release(source)
+        }
+    }
     return collector.values
 }
 
 private final class MixerMeter: ObservableObject {
     private let lock = NSLock()
     private var peak = -60.0
+    private var timestamp = DispatchTime.now().uptimeNanoseconds
+    private var decay = 23.53
     private var meter: OpaquePointer?
 
     static let callback: obs_volmeter_updated_t = { parameter, _, peak, _ in
@@ -218,14 +368,20 @@ private final class MixerMeter: ObservableObject {
         let owner = Unmanaged<MixerMeter>.fromOpaque(parameter).takeUnretainedValue()
         owner.lock.lock()
         let channels = Int(obs_volmeter_get_nr_channels(owner.meter))
-        owner.peak = Double(UnsafeBufferPointer(start: peak, count: channels).max() ?? -60)
+        let now = DispatchTime.now().uptimeNanoseconds
+        let fallen = owner.peak - owner.decay * Double(now - owner.timestamp) / 1_000_000_000
+        owner.peak = max(fallen, Double(UnsafeBufferPointer(start: peak, count: channels).max() ?? -60))
+        owner.timestamp = now
         owner.lock.unlock()
     }
 
     func attach(_ source: SourceReference) {
         guard meter == nil, let reference = obs_volmeter_create(OBS_FADER_LOG) else { return }
         meter = reference
-        obs_volmeter_set_peak_meter_type(reference, TRUE_PEAK_METER)
+        let profile = obs_frontend_get_profile_config()
+        let truePeak = config_get_uint(profile, "Audio", "PeakMeterType") == 1
+        decay = config_get_double(profile, "Audio", "MeterDecayRate")
+        obs_volmeter_set_peak_meter_type(reference, truePeak ? TRUE_PEAK_METER : SAMPLE_PEAK_METER)
         obs_volmeter_add_callback(reference, Self.callback, Unmanaged.passUnretained(self).toOpaque())
         withSource(source.id) { _ = obs_volmeter_attach_source(reference, $0) }
     }
@@ -233,7 +389,8 @@ private final class MixerMeter: ObservableObject {
     func level() -> Double {
         lock.lock()
         defer { lock.unlock() }
-        return max(-60, min(0, peak))
+        let elapsed = Double(DispatchTime.now().uptimeNanoseconds - timestamp) / 1_000_000_000
+        return max(-60, min(0, peak - decay * elapsed))
     }
 
     deinit {
@@ -358,7 +515,7 @@ private struct AdvancedAudioSection: View {
             }.onChange(of: monitoring) { value in update { obs_source_set_monitoring_type($0, value) } }
             ForEach(0..<6) { index in
                 let mask = UInt32(1 << index)
-                Toggle(OBSLocale.str("Basic.AdvAudio.Tracks") + " \(index + 1)", isOn: Binding(get: { tracks & mask != 0 }, set: {
+                Toggle(OBSLocale.str("Basic.AdvAudio.AudioTracks") + " \(index + 1)", isOn: Binding(get: { tracks & mask != 0 }, set: {
                     tracks = $0 ? tracks | mask : tracks & ~mask
                     update { obs_source_set_audio_mixers($0, tracks) }
                 }))
@@ -423,17 +580,28 @@ struct OBSStatsView: View {
 
 struct MultiviewView: View {
     @ObservedObject var model: WorkspaceModel
+    private let columns = Array(repeating: GridItem(.flexible(minimum: 0), spacing: 4), count: 4)
 
     var body: some View {
+        let activeScene = programSceneID
         ScrollView {
-            HStack {
-                tile(OBSLocale.str("StudioMode.Preview"), source: model.currentScene)
-                tile(OBSLocale.str("StudioMode.Program"), source: nil)
+            HStack(spacing: 4) {
+                tile(OBSLocale.str("StudioMode.Preview"), source: model.currentScene, selected: .green, safeAreas: true)
+                tile(OBSLocale.str("StudioMode.Program"), source: nil, selected: .red, safeAreas: true)
             }
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 130))]) {
-                ForEach(model.scenes) { scene in
-                    Button { model.pickScene(scene) } label: { tile(scene.name, source: scene.id) }
+            LazyVGrid(columns: columns, spacing: 4) {
+                ForEach(0..<max(8, ((model.scenes.count + 3) / 4) * 4), id: \.self) { index in
+                    if index < model.scenes.count {
+                        let scene = model.scenes[index]
+                        Button { model.pickScene(scene) } label: {
+                            tile(scene.name, source: scene.id,
+                                 selected: activeScene == scene.id ? .red :
+                                     scene.id == model.currentScene && model.studio ? .green : nil)
+                        }
                         .buttonStyle(.plain)
+                    } else {
+                        Color.black.aspectRatio(16 / 9, contentMode: .fit)
+                    }
                 }
             }
         }
@@ -441,11 +609,28 @@ struct MultiviewView: View {
         .navigationTitle(OBSLocale.str("Projector.Title.Multiview"))
     }
 
-    private func tile(_ name: String, source: String?) -> some View {
-        VStack(spacing: 3) {
+    private var programSceneID: String? {
+        guard let source = obs_frontend_get_current_scene() else { return nil }
+        defer { obs_source_release(source) }
+        return SourceReference(source).id
+    }
+
+    private func tile(_ name: String, source: String?, selected: Color? = nil, safeAreas: Bool = false) -> some View {
+        ZStack(alignment: .bottom) {
             OBSPreview(source: source).aspectRatio(16 / 9, contentMode: .fit).background(.black)
-            Text(name).font(.caption).lineLimit(1)
+            if safeAreas {
+                GeometryReader { geometry in
+                    ForEach([0.8, 0.9], id: \.self) { ratio in
+                        Rectangle().strokeBorder(.white.opacity(0.35), lineWidth: 1)
+                            .frame(width: geometry.size.width * ratio, height: geometry.size.height * ratio)
+                            .position(x: geometry.size.width / 2, y: geometry.size.height / 2)
+                    }
+                }.allowsHitTesting(false)
+            }
+            Text(name).font(.caption2.monospaced()).lineLimit(1).foregroundStyle(.white)
+                .padding(.horizontal, 5).padding(.vertical, 3).background(.black.opacity(0.7))
         }
+        .overlay { Rectangle().strokeBorder(selected ?? .clear, lineWidth: 2).allowsHitTesting(false) }
     }
 }
 

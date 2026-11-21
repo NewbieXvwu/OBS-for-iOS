@@ -74,9 +74,21 @@ final class WorkspaceModel: ObservableObject {
     @Published var duration = 300
     @Published var tbar = 0.0
     @Published var previewEnabled = true
-    let inputKinds: [SourceKind]
+    @Published var editMode = EditMode.proportional
+    @Published private(set) var inputKinds: [SourceKind] = []
+
+    enum EditMode: String, CaseIterable {
+        case proportional = "Basic.TransformWindow.Size"
+        case stretch = "Basic.MainMenu.Edit.Transform.StretchToScreen"
+        case crop = "Basic.TransformWindow.Crop"
+    }
 
     init() {
+        reloadSourceKinds()
+        refresh()
+    }
+
+    func reloadSourceKinds() {
         var kinds: [SourceKind] = []
         var index = 0
         var id: UnsafePointer<CChar>?
@@ -91,7 +103,6 @@ final class WorkspaceModel: ObservableObject {
             }
         }
         inputKinds = kinds.sorted { $0.name.localizedCompare($1.name) == .orderedAscending }
-        refresh()
     }
 
     func refresh() {
@@ -160,34 +171,37 @@ final class WorkspaceModel: ObservableObject {
     }
 
     func addSource(_ kind: SourceKind, name: String) {
-        withCurrentScene { scene in
-            guard let source = obs_source_create(kind.id, name, nil, nil) else { return }
-            defer { obs_source_release(source) }
-            if let item = obs_scene_add(scene, source) { obs_sceneitem_select(item, true) }
+        editScene("Undo.Add") {
+            withCurrentScene { scene in
+                guard let source = obs_source_create(kind.id, name, nil, nil) else { return }
+                defer { obs_source_release(source) }
+                if let item = obs_scene_add(scene, source) { obs_sceneitem_select(item, true) }
+            }
         }
-        saveSources()
     }
 
     func nestScene(_ nested: SourceReference) {
-        withCurrentScene { scene in
-            withSource(nested.id) { source in _ = obs_scene_add(scene, source) }
+        editScene("Undo.Add") {
+            withCurrentScene { scene in
+                withSource(nested.id) { source in _ = obs_scene_add(scene, source) }
+            }
         }
-        saveSources()
     }
 
     func groupSelected(_ name: String) {
-        withCurrentScene { scene in
-            guard let group = obs_scene_add_group(scene, name) else { return }
-            if let selectedItem, selectedItem.depth == 0 {
-                withItem(selectedItem) { obs_sceneitem_group_add_item(group, $0) }
+        editScene("Undo.GroupItems") {
+            withCurrentScene { scene in
+                guard let group = obs_scene_add_group(scene, name) else { return }
+                if let selectedItem, selectedItem.depth == 0 {
+                    withItem(selectedItem) { obs_sceneitem_group_add_item(group, $0) }
+                }
             }
         }
-        saveSources()
     }
 
     func withItem(_ item: SceneItemReference, _ body: (OpaquePointer) -> Void) {
         withSource(item.scene) { source in
-            guard let scene = obs_scene_from_source(source), let found = obs_scene_find_sceneitem_by_id(scene, item.item)
+            guard let scene = obs_group_or_scene_from_source(source), let found = obs_scene_find_sceneitem_by_id(scene, item.item)
             else { return }
             body(found)
         }
@@ -202,6 +216,26 @@ final class WorkspaceModel: ObservableObject {
     func saveSources() {
         obs_frontend_save()
         refreshSources()
+    }
+
+    func snapshot() -> String? {
+        guard let data = withSource(currentScene, obs_app_snapshot_scene) ?? nil else { return nil }
+        defer { obs_data_release(data) }
+        return obs_data_get_json(data).map { String(cString: $0) }
+    }
+
+    func finishEdit(_ key: String, from before: String?, repeatable: Bool = false) {
+        if let before, let after = snapshot() {
+            obs_frontend_add_undo_redo_action(OBSLocale.str(key), obs_app_restore_scene, obs_app_restore_scene,
+                                             before, after, repeatable)
+        }
+        saveSources()
+    }
+
+    func editScene(_ key: String, _ edit: () -> Void) {
+        let before = snapshot()
+        edit()
+        finishEdit(key, from: before)
     }
 
     func setTransition(_ identifier: String) {

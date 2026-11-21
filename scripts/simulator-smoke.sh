@@ -31,22 +31,34 @@ app="$PWD/.build/ios/iphonesimulator/ios-app/Release-iphonesimulator/OBS.app"
 bundle=org.obsproject.studio.ios
 xcrun simctl install "$sim" "$app"
 data=$(xcrun simctl get_app_container "$sim" "$bundle" data)
+name=${run##*/}
+config_root="$data/Library/Application Support/OBS"
+workspace=${OBS_TEST_WORKSPACE:-0}
+if [[ $workspace == 1 ]]; then
+  config_root="$config_root/smoke/$name"
+fi
 if [[ ${OBS_TEST_WEBSOCKET:-0} == 1 ]]; then
-  directory="$data/Library/Application Support/OBS/obs-websocket"
+  directory="$config_root/obs-websocket"
   mkdir -p "$directory"
   websocket_config="$directory/config.json"
   if [[ -f $websocket_config ]]; then mv "$websocket_config" "$run/websocket-original.json"; fi
   printf '%s\n' '{"first_load":false,"server_enabled":true,"server_port":19455,"auth_required":true,"server_password":"obs-ios-simulator"}' > "$websocket_config"
 fi
 
-url=rtmp://127.0.0.1:19351/obs
-ffmpeg -hide_banner -nostdin -loglevel warning -listen 1 -i "$url/phase1" -c copy "$run/rtmp.flv" \
-  > "$run/rtmp.log" 2>&1 &
-listener=$!
-name=${run##*/}
-SIMCTL_CHILD_OBS_TEST_RTMP="$url" SIMCTL_CHILD_OBS_SMOKE_RUN="$name" \
-  xcrun simctl launch --terminate-running-process --stdout="$run/stdout.log" --stderr="$run/stderr.log" \
-    "$sim" "$bundle" --recording-smoke
+if [[ $workspace == 1 ]]; then
+  arguments=(--workspace-smoke)
+  if [[ ${OBS_TEST_BROWSER:-0} == 1 ]]; then arguments+=(--browser-smoke); fi
+  export SIMCTL_CHILD_OBS_WORKSPACE_SMOKE_RUN="$name"
+else
+  arguments=(--recording-smoke)
+  url=rtmp://127.0.0.1:19351/obs
+  ffmpeg -hide_banner -nostdin -loglevel warning -listen 1 -i "$url/phase1" -c copy "$run/rtmp.flv" \
+    > "$run/rtmp.log" 2>&1 &
+  listener=$!
+  export SIMCTL_CHILD_OBS_TEST_RTMP="$url" SIMCTL_CHILD_OBS_SMOKE_RUN="$name"
+fi
+xcrun simctl launch --terminate-running-process --stdout="$run/stdout.log" --stderr="$run/stderr.log" \
+  "$sim" "$bundle" "${arguments[@]}"
 
 if [[ -n $websocket_config ]]; then
   for attempt in {1..25}; do
@@ -87,6 +99,17 @@ socket.onmessage = event => {
   }
 };
 NODE
+fi
+if [[ $workspace == 1 ]]; then
+  for attempt in {1..35}; do
+    if grep -q 'OBS workspace smoke: complete' "$run/stdout.log" 2>/dev/null; then
+      grep 'OBS workspace smoke:' "$run/stdout.log"
+      exit 0
+    fi
+    sleep 1
+  done
+  cat "$run/stderr.log"
+  exit 1
 fi
 for attempt in {1..20}; do
   if [[ -s "$data/Documents/phase1-$name.mp4" && -s "$run/rtmp.flv" ]] && ! kill -0 "$listener" 2>/dev/null; then

@@ -16,6 +16,9 @@ websocket="$root/obs-studio/plugins/obs-websocket"
 if [[ ! -f $websocket/CMakeLists.txt ]]; then
   git -C obs-studio submodule update --init --depth 1 plugins/obs-websocket
 fi
+if [[ ! -f $root/obs-studio/plugins/obs-browser/data/locale/en-US.ini ]]; then
+  git -C obs-studio submodule update --init --depth 1 plugins/obs-browser
+fi
 port_patch="$root/obs-studio/cmake/ios/obs-websocket.patch"
 websocket_source="$root/.build/ios/websocket-$(git -C "$websocket" rev-parse --short HEAD)"
 if [[ ! -f $websocket_source/.patched || $port_patch -nt $websocket_source/.patched ]]; then
@@ -35,6 +38,11 @@ fi
 for sdk in "${sdks[@]}"; do
   prefix="$root/.deps-prebuilt/$sdk-arm64"
   build="$root/.build/ios/$sdk"
+  variant=OFF
+  if [[ ${OBS_PRIVILEGED_BUILD:-0} == 1 ]]; then
+    build="$root/.build/ios/privileged/$sdk"
+    variant=ON
+  fi
   sdk_path=$(xcrun --sdk "$sdk" --show-sdk-path)
   export PKG_CONFIG_LIBDIR="$prefix/lib/pkgconfig:$prefix/share/pkgconfig" PKG_CONFIG_PATH=
   cmake -S obs-studio -B "$build" -G Xcode \
@@ -45,6 +53,7 @@ for sdk in "${sdks[@]}"; do
     -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY -DOBS_VERSION_OVERRIDE=33.0.0-ios \
     -DOBS_IOS_APP_SOURCE_DIR="$root/ios-app" -DOBS_IOS_CA_BUNDLE="$ca_bundle" \
     -DOBS_IOS_WEBSOCKET_SOURCE_DIR="$websocket_source" \
+    -DOBS_IOS_PRIVILEGED="$variant" \
     -DENABLE_WEBSOCKET=ON "$@"
   cmake --build "$build" --config Release --parallel "${JOBS:-$(sysctl -n hw.logicalcpu)}"
 done
