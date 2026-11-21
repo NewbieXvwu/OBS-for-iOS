@@ -133,7 +133,7 @@ OBS-for-iOS/                          # 本独立外壳仓库（工作根目录�
   * 将 `MTLStorageModeManaged` 替换为 iOS 统一内存支持的 `MTLStorageModeShared` / `MTLStorageModePrivate`。
   * **完整保留 10-bit / HDR（P010 / RGBA16F / HLG / PQ）色彩管线支持**，不要照搬 Android 裁剪 10-bit。
   * 移除 macOS 独有的多显卡枚举与 `CVDisplayLink`，增加前后台切换时 Metal 命令队列安全排空钩子。
-- [ ] **1.4 复用改造 `obs-studio/plugins/ios-videotoolbox/`**
+- [x] **1.4 复用改造 `obs-studio/plugins/ios-videotoolbox/`**
   * 直接基于官方 `mac-videotoolbox` 改造为 iOS H.264 / HEVC（含 Main10 10-bit HDR）硬编插件。
   * 通过 `CVMetalTextureCache` 将合成后的 Metal 纹理零拷贝映射到 `CVPixelBuffer` 送入 `VTCompressionSession`，保留完整码率控制（CBR/VBR/CRF）、Profile、Keyframe Interval 与动态码率（Dynamic Bitrate）支持。
 - [ ] **1.5 编写 `scripts/build-libobs-ios.sh` 并打通模拟器无界面推流/录像闭环**
