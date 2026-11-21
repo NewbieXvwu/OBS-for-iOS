@@ -1,0 +1,4 @@
+[submodule "obs-studio"]
+	path = obs-studio
+	url = https://github.com/NewbieXvwu/obs-studio.git
+	branch = ios-port

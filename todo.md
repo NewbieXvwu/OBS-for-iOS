@@ -103,7 +103,7 @@ OBS-for-iOS/                          # 本独立外壳仓库（工作根目录�
 - [x] **0.2 初始化 `OBS-for-iOS` 外壳仓库与 `.gitignore`**
   * `.gitignore` 必须完整忽略：`.workspace-tools/`、`.deps-src/`、`.deps-build/`、`.deps-prebuilt/`、`.build/`、`.DS_Store`、`*.xcuserdata`。
   * 创建目录 `deps-ios/`、`scripts/`、`ios-app/`。
-- [ ] **0.3 挂载官方 `obs-studio` Fork 为 Git Submodule**
+- [x] **0.3 挂载官方 `obs-studio` Fork 为 Git Submodule**
   * 将 `NewbieXvwu/obs-studio` 作为 submodule 挂载到 `obs-studio/`，切出独立分支 `ios-port`。
   * **约束**：不得修改 `obs-studio/frontend/` 下的桌面 Qt 源码（仅将其作为 1:1 复刻蓝本和 `.ini` 词条/资源数据源）。
 - [ ] **0.4 配置工作区隔离构建工具（`.workspace-tools/`）**
