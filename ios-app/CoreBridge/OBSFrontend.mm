@@ -241,8 +241,8 @@ class IOSFrontend final : public obs_frontend_callbacks {
 			if (source)
 				transitions.emplace_back(source.Get());
 		}
-		for (const char *id : {"cut_transition", "fade_transition", "swipe_transition", "slide_transition",
-				       "obs_stinger_transition", "luma_wipe_transition"}) {
+		const char *id = nullptr;
+		for (size_t index = 0; obs_enum_transition_types(index, &id); index++) {
 			const char *label = obs_source_get_display_name(id);
 			if (!label)
 				continue;
@@ -267,8 +267,8 @@ class IOSFrontend final : public obs_frontend_callbacks {
 		OBSSourceAutoRelease savedPreview = obs_get_source_by_name(obs_data_get_string(saved, "current_scene"));
 		program = savedProgram ? OBSSource(savedProgram.Get()) : scenes.front();
 		preview = savedPreview ? OBSSource(savedPreview.Get()) : program;
-		if (obs_data_get_int(saved, "transition_duration") > 0)
-			duration = (int)obs_data_get_int(saved, "transition_duration");
+		if (obs_data_has_user_value(saved, "transition_duration"))
+			duration = (int)std::clamp<int64_t>(obs_data_get_int(saved, "transition_duration"), 0, 20000);
 		if (transition) {
 			obs_transition_set(transition, program);
 			obs_set_output_source(0, transition);
@@ -365,9 +365,12 @@ class IOSFrontend final : public obs_frontend_callbacks {
 			const char *pattern = config_get_string(config, "Output", "FilenameFormatting");
 			if (slot == Replay) {
 				obs_data_set_string(outputSettings, "directory", directory.c_str());
-				obs_data_set_string(outputSettings, "format", pattern);
-				obs_data_set_string(outputSettings, "prefix", config_get_string(config, "SimpleOutput", "RecRBPrefix"));
-				obs_data_set_string(outputSettings, "suffix", config_get_string(config, "SimpleOutput", "RecRBSuffix"));
+				const char *prefix = config_get_string(config, "SimpleOutput", "RecRBPrefix");
+				const char *suffix = config_get_string(config, "SimpleOutput", "RecRBSuffix");
+				std::string filename = prefix && *prefix ? std::string(prefix) + " " + pattern : pattern;
+				if (suffix && *suffix)
+					filename += " " + std::string(suffix);
+				obs_data_set_string(outputSettings, "format", filename.c_str());
 				obs_data_set_string(outputSettings, "extension", extension);
 				obs_data_set_bool(outputSettings, "hybrid", hybrid);
 				obs_data_set_int(outputSettings, "max_time_sec", config_get_uint(config, section, "RecRBTime"));
