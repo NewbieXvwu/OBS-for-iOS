@@ -175,25 +175,31 @@ struct WorkspaceView: View {
         }
         guard let item = model.sources.first else { return }
         model.select(item)
+        var projectorSource = item.source.id
         func render() async { try? await Task.sleep(for: .milliseconds(400)) }
         if ProcessInfo.processInfo.arguments.contains("--browser-smoke") {
             let settings = obs_data_create()
-            obs_data_set_string(settings, "url", "data:text/html,<div id='capture'>OBS</div>")
+            let html = """
+            <meta charset="utf-8"><style>body{margin:0}main{position:fixed;inset:0;background:linear-gradient(90deg,#f00 0 16%,#0f0 16% 33%,#00f 33% 50%,#000 50% 67%,#888 67% 84%,#fff 84%)}span{position:absolute;top:8%;left:4%;font:40px monospace;color:white;text-shadow:2px 2px black}i{position:absolute;top:50%;width:10%;height:20%;background:#ff0;animation:move 2s linear infinite alternate}@keyframes move{from{left:0}to{left:90%}}</style><main><span>上 / 左 → 右 · OBS <b id="f">0</b></span><i></i></main><script>let n=0;setInterval(()=>document.getElementById('f').textContent=++n,33)</script>
+            """
+            let page = "data:text/html;base64," + Data(html.utf8).base64EncodedString()
+            obs_data_set_string(settings, "url", page)
             obs_data_set_string(settings, "css", "body { margin: 0; background: transparent; color: #e80; }")
-            obs_data_set_int(settings, "width", 320)
-            obs_data_set_int(settings, "height", 180)
+            obs_data_set_int(settings, "width", 1280)
+            obs_data_set_int(settings, "height", 720)
             let browser = obs_source_create("browser_source", "Simulator Browser", settings, nil)
             obs_data_release(settings)
             guard let browser else { return }
+            projectorSource = String(cString: obs_source_get_uuid(browser))
             model.withCurrentScene { _ = obs_scene_add($0, browser) }
             for _ in 0..<30 {
                 if obs_source_get_width(browser) > 0 { break }
                 await render()
             }
-            let captured = obs_source_get_width(browser) > 0 && obs_source_get_height(browser) > 0
+            let captured = obs_source_get_width(browser) == 1280 && obs_source_get_height(browser) == 720
             obs_source_release(browser)
             guard captured else {
-                print("OBS workspace smoke: browser produced no frames")
+                print("OBS workspace smoke: browser dimensions do not match 1280x720")
                 return
             }
             print("OBS workspace smoke: WebKit frame")
@@ -205,6 +211,27 @@ struct WorkspaceView: View {
         model.toggleStudio()
         await render()
         guard obs_frontend_preview_program_mode_active() else { return }
+        if ProcessInfo.processInfo.arguments.contains("--external-smoke") {
+            for _ in 0..<30 {
+                if !projectors.externalScenes.isEmpty { break }
+                await render()
+            }
+            guard !projectors.externalScenes.isEmpty else {
+                print("OBS external smoke: no connected scene")
+                return
+            }
+            for (index, selection) in [ProjectorSelection.program, .preview, .source(projectorSource), .multiview].enumerated() {
+                showProjector(selection)
+                await render()
+                print("OBS external smoke: \(index)")
+                try? await Task.sleep(for: .seconds(3))
+            }
+            projectors.external = nil
+            print("OBS external smoke: clear")
+            try? await Task.sleep(for: .seconds(3))
+            showProjector(.program)
+            print("OBS external smoke: complete")
+        }
         for panel in [Sheet.transform(item), .properties(item.source), .advancedAudio, .stats, .multiview] {
             sheet = panel
             await render()

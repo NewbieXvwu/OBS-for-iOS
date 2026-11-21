@@ -28,12 +28,17 @@ if [[ -z $sim ]]; then echo "没有可用的 iPhone 模拟器" >&2; exit 1; fi
 printf '%s\n' "$run"
 xcrun simctl bootstatus "$sim" -b > "$run/boot.log" 2>&1
 app="$PWD/.build/ios/iphonesimulator/ios-app/Release-iphonesimulator/OBS.app"
+if [[ ${OBS_PRIVILEGED_BUILD:-0} == 1 ]]; then
+  app="$PWD/.build/ios/privileged/iphonesimulator/ios-app/Release-iphonesimulator/OBS.app"
+fi
 bundle=org.obsproject.studio.ios
 xcrun simctl install "$sim" "$app"
 data=$(xcrun simctl get_app_container "$sim" "$bundle" data)
 name=${run##*/}
 config_root="$data/Library/Application Support/OBS"
 workspace=${OBS_TEST_WORKSPACE:-0}
+external=${OBS_TEST_EXTERNAL:-0}
+if [[ $external == 1 ]]; then workspace=1; fi
 if [[ $workspace == 1 ]]; then
   config_root="$config_root/smoke/$name"
 fi
@@ -47,7 +52,8 @@ fi
 
 if [[ $workspace == 1 ]]; then
   arguments=(--workspace-smoke)
-  if [[ ${OBS_TEST_BROWSER:-0} == 1 ]]; then arguments+=(--browser-smoke); fi
+  if [[ ${OBS_TEST_BROWSER:-0} == 1 || $external == 1 ]]; then arguments+=(--browser-smoke); fi
+  if [[ $external == 1 ]]; then arguments+=(--external-smoke); fi
   export SIMCTL_CHILD_OBS_WORKSPACE_SMOKE_RUN="$name"
 else
   arguments=(--recording-smoke)
@@ -59,6 +65,29 @@ else
 fi
 xcrun simctl launch --terminate-running-process --stdout="$run/stdout.log" --stderr="$run/stderr.log" \
   "$sim" "$bundle" "${arguments[@]}"
+
+if [[ $external == 1 ]]; then
+  xcrun simctl io "$sim" screenConfig --display=external power on
+  for mode in 0 1 2 3 clear; do
+    found=0
+    for attempt in {1..120}; do
+      if grep -q "^OBS external smoke: $mode$" "$run/stdout.log"; then found=1; break; fi
+      if grep -q 'OBS external smoke: no connected scene' "$run/stdout.log"; then break; fi
+      sleep .25
+    done
+    if [[ $found == 0 ]]; then cat "$run/stdout.log" "$run/stderr.log"; exit 1; fi
+    xcrun simctl io "$sim" screenshot --display=external "$run/external-$mode.png"
+  done
+  for attempt in {1..30}; do
+    if grep -q '^OBS external smoke: complete$' "$run/stdout.log"; then break; fi
+    sleep .25
+  done
+  xcrun simctl io "$sim" screenConfig --display=external power off
+  sleep 1
+  xcrun simctl io "$sim" screenConfig --display=external power on
+  sleep 1
+  xcrun simctl io "$sim" screenshot --display=external "$run/external-reconnected.png"
+fi
 
 if [[ -n $websocket_config ]]; then
   for attempt in {1..25}; do
