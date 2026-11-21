@@ -376,6 +376,14 @@ void obs_app_privileged_frontend_ready(void)
 			else if (output_running || screen_running)
 				start_keepalive_audio();
 		}];
+	[center addObserverForName:AVAudioSessionMediaServicesWereResetNotification object:nil queue:NSOperationQueue.mainQueue
+		usingBlock:^(NSNotification *notification) {
+			[keepalive_audio stop];
+			keepalive_audio = nil;
+			silence = nil;
+			if (output_running || screen_running)
+				start_keepalive_audio();
+		}];
 }
 
 void obs_app_install_privileged_host(void)
