@@ -145,13 +145,13 @@ OBS-for-iOS/                          # 本独立外壳仓库（工作根目录�
 
 ### 阶段 2：1:1 复刻官方前端（SwiftUI）与核心原生采集源
 
-- [ ] **2.1 搭建 `ios-app/CoreBridge/` 与官方 `.ini` 词条加载器**
+- [x] **2.1 搭建 `ios-app/CoreBridge/` 与官方 `.ini` 词条加载器**
   * 封装 `libobs` 生命周期、配置管理、场景/来源/转场/滤镜/混音器/热键/推流/录像/重放缓冲 API。
   * **直接复用官方本地化资源**：实现 `OBSLocale` 加载器，读取打包进 Bundle 的 `obs-studio/frontend/data/locale/*.ini` 与各插件 `data/locale/*.ini`，SwiftUI 侧全部通过 `OBSLocale.str("Basic.Main.StartStreaming")` 等官方 Key 渲染文本，支持跟随系统或设置页手动切换官方语言。
-- [ ] **2.2 复用改造 `ios-avcapture` 与 `ios-audio` 插件**
+- [x] **2.2 复用改造 `ios-avcapture` 与 `ios-audio` 插件**
   * `ios-avcapture`：基于官方 `mac-avcapture` 改造，使用 `AVCaptureSession` + `AVCaptureDeviceDiscoverySession` 枚举前置、后置及 iPadOS 17+ `.external` 原生 UVC 采集卡，零拷贝 `CVPixelBuffer` 入 Metal，正确处理设备旋转与分辨率/帧率档位。
   * `ios-audio`：基于 `AVAudioEngine` / `AudioUnit` 采集内置麦、蓝牙、USB 声卡，监听 `AVAudioSession` 路由变更与通话中断自动恢复；复用官方 `coreaudio-encoder` 的 AudioToolbox AAC 硬编；完整实现音频监听输出（`Monitor Off / Monitor Only / Monitor and Output`）。
-- [ ] **2.3 1:1 复刻官方 OBS 主界面与完整工作区（SwiftUI）**
+- [x] **2.3 1:1 复刻官方 OBS 主界面与完整工作区（SwiftUI）**
   * 严格对照 `obs-studio/frontend/` 复刻全部核心面板（横屏为标准导播台多 Dock 布局，竖屏/小窗自适应切换分页或抽屉，不砍任何功能）：
     * **主预览画布（`CAMetalLayer`）+ 工作室模式（Studio Mode）**：支持单画布与双画布（Preview + Program）切换、转场推杆（T-Bar）与快速切换按钮；支持来源选中框、拖拽移动、等比/自由缩放、边缘裁剪（Crop）、锁定与对齐吸附。
     * **场景（Scenes）与来源（Sources）面板**：完整支持增删改名、排序、显隐、锁定、**来源分组（Group）**、**场景嵌套（Scene as Source）**、来源右键/长按完整上下文菜单（含**变换 Transform 对话框**：位置/旋转/尺寸/裁剪/边界框/适配屏幕/拉伸/居中；**显示/隐藏转场**；**滤镜 Filters**；**属性 Properties**）。
@@ -159,10 +159,10 @@ OBS-for-iOS/                          # 本独立外壳仓库（工作根目录�
     * **混音器（Audio Mixer）与高级音频属性对话框**：真峰值电平表（Peak Meter，dB 刻度与削波指示）、音量推子、静音、以及完整的**高级音频属性（Advanced Audio Properties）**（音量 dB/百分比、单声道、声道平衡、同步偏移 Sync Offset、监听模式、Track 1–6 多音轨勾选）。
     * **控制（Controls）与统计（Stats）面板**：开始/停止推流、开始/停止录像、**暂停/恢复录像（Pause/Resume）**、**重放缓冲（Replay Buffer）启停与保存**、工作室模式开关、设置、退出；Stats 面板实时展示 FPS、渲染平均耗时、渲染/编码/网络丢帧、CPU/内存与实时码率。
     * **顶部菜单栏**：复刻官方“文件（含查看录像、日志查看器 Log Viewer） / 编辑（撤销重做、变换、高级音频） / 视图（Docks、Stats、Multiview） / 配置文件（Profiles 增删改导入导出） / 场景集合（Scene Collections 增删改导入导出） / 工具（WebSocket 服务器设置等）”。
-- [ ] **2.4 1:1 复刻官方设置对话框（Settings）全部可用 Tab 与通用 `OBSPropertiesView`**
+- [x] **2.4 1:1 复刻官方设置对话框（Settings）全部可用 Tab 与通用 `OBSPropertiesView`**
   * 实现通用的 `OBSPropertiesView`，递归解析任意 `obs_properties_t` 自动生成全部官方控件类型（Bool、Int/Float 滑块与输入框、List、EditableList、Path/File、Color、Font、Text、Group、Button），严禁跳过控件类型或自写文案。
   * 1:1 复刻官方 Settings 全部适用分页：**常规（General，含语言/自动重连/确认提示）**、**直播（Stream，完整 83+ `rtmp-services` + 自定义 RTMP/SRT/RIST/WHIP）**、**输出（Output，完整 Simple 与 Advanced 模式、推流/录像/音频多轨/重放缓冲独立页签，非越狱态按能力位隐藏需子进程的容器）**、**音频（Audio，采样率/声道/全局音频设备/监听设备/峰值衰减）**、**视频（Video，基础/输出分辨率/缩放滤镜/FPS）**、**热键（Hotkeys，接入 `obs_hotkey_*` 支持外接键盘快捷键）**、**高级（Advanced，含色彩格式 NV12/I420/P010、色彩空间 Rec.709/2100 PQ/HLG、推流延迟、自动重连、动态码率）**。
-- [ ] **阶段 2 验收**：在 iOS Simulator 中自动构建、安装并启动 App，验证所有主面板、工作室模式、设置页全 Tab、官方多语言词条加载、来源变换、高级音频属性、Stats 面板及 WebSocket 端口监听正常，无崩溃与缺失文案，随后立即关闭并清理模拟器。
+- [x] **阶段 2 验收**：在 iOS Simulator 中自动构建、安装并启动 App，验证所有主面板、工作室模式、设置页全 Tab、官方多语言词条加载、来源变换、高级音频属性、Stats 面板及 WebSocket 端口监听正常，无崩溃与缺失文案，随后立即关闭并清理模拟器。
 
 ---
 
