@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /* 自研必要性证明：官方 mac-capture 的回调与合成处于同一进程。ReplayKit 在
- * 独立扩展内运行。这里使用 App Group 共享页和 CoreVideo 释放回调接入 libobs。 */
+ * 独立扩展内运行。视频复用 IOSurface Mach 端口，PCM 复用 App Group 共享页。
+ * 官方模块没有广播扩展的跨进程端口接收入口。 */
 
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -9,14 +10,31 @@
 #include <obs-ios.h>
 #include <obs.h>
 #include <util/platform.h>
+#import <IOSurface/IOSurfaceRef.h>
 #include "../BroadcastUploadExtension/BroadcastIPC.h"
 
+void obs_app_privileged_screen_job(bool running);
+
 static dispatch_queue_t inbox;
-static dispatch_source_t listener, receiver;
+static dispatch_source_t listener, receiver, surface_receiver;
 static int receiver_fd = -1;
 static obs_ios_screen_frame_cb frame_callback;
 static obs_ios_screen_audio_cb audio_callback;
 static void *capture_context;
+
+/* Keep the producer's surface out of its pool until the last CVPixelBuffer/GPU reference ends. */
+@interface OBSSurfaceLease : NSObject {
+@public
+	IOSurfaceRef surface;
+}
+@end
+@implementation OBSSurfaceLease
+- (void)dealloc
+{
+	IOSurfaceDecrementUseCount(surface);
+	CFRelease(surface);
+}
+@end
 
 static void release_frame(struct BroadcastFrame *frame, size_t length)
 {
@@ -33,6 +51,26 @@ static void release_bytes(void *context, const void *bytes)
 static void release_planes(void *context, const void *bytes, size_t length, size_t count, const void *planes[])
 {
 	release_bytes(context, bytes);
+}
+
+static void set_attachments(CVPixelBufferRef pixel, const struct BroadcastFrame *frame)
+{
+	if (frame->orientation >= 1 && frame->orientation <= 8)
+		CVBufferSetAttachment(pixel, OBS_BROADCAST_ORIENTATION, (__bridge CFNumberRef)@(frame->orientation),
+				      kCVAttachmentMode_ShouldPropagate);
+	CFStringRef matrix = frame->matrix == Color601 ? kCVImageBufferYCbCrMatrix_ITU_R_601_4 :
+		frame->matrix == Color2020 ? kCVImageBufferYCbCrMatrix_ITU_R_2020 : kCVImageBufferYCbCrMatrix_ITU_R_709_2;
+	if (frame->matrix)
+		CVBufferSetAttachment(pixel, kCVImageBufferYCbCrMatrixKey, matrix, kCVAttachmentMode_ShouldPropagate);
+	CFStringRef primaries = frame->primaries == ColorP3 ? kCVImageBufferColorPrimaries_P3_D65 :
+		frame->primaries == Color2020 ? kCVImageBufferColorPrimaries_ITU_R_2020 : kCVImageBufferColorPrimaries_ITU_R_709_2;
+	if (frame->primaries)
+		CVBufferSetAttachment(pixel, kCVImageBufferColorPrimariesKey, primaries, kCVAttachmentMode_ShouldPropagate);
+	CFStringRef transfer = frame->transfer == ColorPQ ? kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ :
+		frame->transfer == ColorHLG ? kCVImageBufferTransferFunction_ITU_R_2100_HLG :
+					    kCVImageBufferTransferFunction_ITU_R_709_2;
+	if (frame->transfer)
+		CVBufferSetAttachment(pixel, kCVImageBufferTransferFunctionKey, transfer, kCVAttachmentMode_ShouldPropagate);
 }
 
 static CVPixelBufferRef make_pixel(struct BroadcastFrame *frame, uint8_t *bytes)
@@ -66,23 +104,89 @@ static CVPixelBufferRef make_pixel(struct BroadcastFrame *frame, uint8_t *bytes)
 	}
 	if (!pixel)
 		return NULL;
-	if (frame->orientation >= 1 && frame->orientation <= 8)
-		CVBufferSetAttachment(pixel, OBS_BROADCAST_ORIENTATION, (__bridge CFNumberRef)@(frame->orientation),
-				      kCVAttachmentMode_ShouldPropagate);
-	CFStringRef matrix = frame->matrix == Color601 ? kCVImageBufferYCbCrMatrix_ITU_R_601_4 :
-		frame->matrix == Color2020 ? kCVImageBufferYCbCrMatrix_ITU_R_2020 : kCVImageBufferYCbCrMatrix_ITU_R_709_2;
-	if (frame->matrix)
-		CVBufferSetAttachment(pixel, kCVImageBufferYCbCrMatrixKey, matrix, kCVAttachmentMode_ShouldPropagate);
-	CFStringRef primaries = frame->primaries == ColorP3 ? kCVImageBufferColorPrimaries_P3_D65 :
-		frame->primaries == Color2020 ? kCVImageBufferColorPrimaries_ITU_R_2020 : kCVImageBufferColorPrimaries_ITU_R_709_2;
-	if (frame->primaries)
-		CVBufferSetAttachment(pixel, kCVImageBufferColorPrimariesKey, primaries, kCVAttachmentMode_ShouldPropagate);
-	CFStringRef transfer = frame->transfer == ColorPQ ? kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ :
-		frame->transfer == ColorHLG ? kCVImageBufferTransferFunction_ITU_R_2100_HLG :
-					    kCVImageBufferTransferFunction_ITU_R_709_2;
-	if (frame->transfer)
-		CVBufferSetAttachment(pixel, kCVImageBufferTransferFunctionKey, transfer, kCVAttachmentMode_ShouldPropagate);
+	set_attachments(pixel, frame);
 	return pixel;
+}
+
+static void read_surface(struct BroadcastSurfaceMessage *message)
+{
+	IOSurfaceRef surface = IOSurfaceLookupFromMachPort(message->surface.name);
+	if (!surface)
+		return;
+	CVPixelBufferRef pixel = NULL;
+	if (IOSurfaceGetWidth(surface) && IOSurfaceGetHeight(surface) &&
+	    IOSurfaceGetWidth(surface) <= 8192 && IOSurfaceGetHeight(surface) <= 8192 &&
+	    CVPixelBufferCreateWithIOSurface(NULL, surface, NULL, &pixel) == kCVReturnSuccess) {
+		OBSSurfaceLease *lease = [OBSSurfaceLease new];
+		lease->surface = (IOSurfaceRef)CFRetain(surface);
+		IOSurfaceIncrementUseCount(surface);
+		CVBufferSetAttachment(pixel, CFSTR("OBSSurfaceLease"), (__bridge CFTypeRef)lease, kCVAttachmentMode_ShouldNotPropagate);
+		set_attachments(pixel, &message->frame);
+		frame_callback(capture_context, pixel, message->frame.timestamp ?: os_gettime_ns());
+		CVPixelBufferRelease(pixel);
+	}
+	CFRelease(surface);
+}
+
+static void receive_surfaces(mach_port_t port, bool discard)
+{
+	for (;;) {
+		struct { struct BroadcastSurfaceMessage message; mach_msg_max_trailer_t trailer; } packet = {0};
+		mach_msg_header_t *header = &packet.message.header;
+		kern_return_t result = mach_msg(header, MACH_RCV_MSG | MACH_RCV_TIMEOUT,
+			0, sizeof(packet), port, 0, MACH_PORT_NULL);
+		if (result == MACH_RCV_TOO_LARGE) {
+			/* Without MACH_RCV_LARGE the kernel destroys the oversized message and its rights. */
+			continue;
+		}
+		if (result != KERN_SUCCESS)
+			return;
+		if (!discard && receiver && frame_callback && header->msgh_id == OBS_BROADCAST_MACH_FRAME &&
+		    header->msgh_size == sizeof(packet.message) && (header->msgh_bits & MACH_MSGH_BITS_COMPLEX) &&
+		    packet.message.body.msgh_descriptor_count == 1 && packet.message.surface.type == MACH_MSG_PORT_DESCRIPTOR &&
+		    packet.message.surface.disposition == MACH_MSG_TYPE_PORT_SEND && MACH_PORT_VALID(packet.message.surface.name)) {
+			read_surface(&packet.message);
+			mach_port_deallocate(mach_task_self(), packet.message.surface.name);
+			packet.message.surface.name = MACH_PORT_NULL;
+		}
+		/* Rejected complex messages also relinquish all transferred rights. */
+		mach_msg_destroy(header);
+	}
+}
+
+static void start_surface_receiver(void)
+{
+	BroadcastBootstrapPort check_in = (BroadcastBootstrapPort)dlsym(RTLD_DEFAULT, "bootstrap_check_in");
+	BroadcastBootstrapRegister register_port = (BroadcastBootstrapRegister)dlsym(RTLD_DEFAULT, "bootstrap_register");
+	mach_port_t bootstrap = MACH_PORT_NULL, port = MACH_PORT_NULL;
+	if (task_get_bootstrap_port(mach_task_self(), &bootstrap) != KERN_SUCCESS)
+		return;
+	kern_return_t result = check_in ? check_in(bootstrap, OBS_BROADCAST_MACH_SERVICE, &port) : KERN_FAILURE;
+	if (result != KERN_SUCCESS && register_port &&
+	    mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &port) == KERN_SUCCESS) {
+		result = mach_port_insert_right(mach_task_self(), port, port, MACH_MSG_TYPE_MAKE_SEND);
+		if (result == KERN_SUCCESS) {
+			result = register_port(bootstrap, OBS_BROADCAST_MACH_SERVICE, port);
+			mach_port_deallocate(mach_task_self(), port);
+		}
+	}
+	mach_port_deallocate(mach_task_self(), bootstrap);
+	if (result != KERN_SUCCESS) {
+		if (MACH_PORT_VALID(port))
+			mach_port_mod_refs(mach_task_self(), port, MACH_PORT_RIGHT_RECEIVE, -1);
+		blog(LOG_INFO, "[iOS broadcast] Mach registration unavailable: %s", mach_error_string(result));
+		return;
+	}
+	const mach_port_limits_t limits = {.mpl_qlimit = 1};
+	mach_port_set_attributes(mach_task_self(), port, MACH_PORT_LIMITS_INFO,
+		(mach_port_info_t)&limits, MACH_PORT_LIMITS_INFO_COUNT);
+	surface_receiver = dispatch_source_create(DISPATCH_SOURCE_TYPE_MACH_RECV, port, 0, inbox);
+	dispatch_source_set_event_handler(surface_receiver, ^{ @autoreleasepool { receive_surfaces(port, false); } });
+	dispatch_source_set_cancel_handler(surface_receiver, ^{
+		mach_port_mod_refs(mach_task_self(), port, MACH_PORT_RIGHT_RECEIVE, -1);
+	});
+	dispatch_activate(surface_receiver);
+	blog(LOG_INFO, "[iOS broadcast] IOSurface Mach receiver ready");
 }
 
 static void output_audio(const struct BroadcastFrame *frame, uint8_t *bytes, uint64_t timestamp)
@@ -151,7 +255,10 @@ static void stop_receiver(void)
 	dispatch_source_cancel(receiver);
 	receiver = nil;
 	receiver_fd = -1;
+	if (surface_receiver)
+		receive_surfaces((mach_port_t)dispatch_source_get_handle(surface_receiver), true);
 	frame_callback(capture_context, NULL, 0);
+	obs_app_privileged_screen_job(false);
 }
 
 static void receive(int fd)
@@ -177,6 +284,8 @@ static void receive(int fd)
 			memcpy(&slot, CMSG_DATA(header), sizeof(slot));
 			read_frame(slot, type);
 		} else if (type == BroadcastPause) {
+			if (surface_receiver)
+				receive_surfaces((mach_port_t)dispatch_source_get_handle(surface_receiver), true);
 			frame_callback(capture_context, NULL, 0);
 		}
 	}
@@ -211,6 +320,7 @@ static bool start_listener(void)
 		dispatch_source_set_cancel_handler(receiver, ^{ close(peer); });
 		dispatch_source_set_event_handler(receiver, ^{ receive(peer); });
 		dispatch_activate(receiver);
+		obs_app_privileged_screen_job(true);
 	});
 	dispatch_activate(listener);
 	return true;
@@ -240,6 +350,8 @@ bool obs_ios_start_replaykit(obs_ios_screen_frame_cb frame, obs_ios_screen_audio
 		frame_callback = frame;
 		audio_callback = audio;
 		capture_context = context;
+		if (!surface_receiver)
+			start_surface_receiver();
 		started = true;
 	});
 	return started;
@@ -253,6 +365,10 @@ void obs_ios_stop_replaykit(void *context)
 		if (!listener || capture_context != context)
 			return;
 		stop_receiver();
+		if (surface_receiver) {
+			dispatch_source_cancel(surface_receiver);
+			surface_receiver = nil;
+		}
 		dispatch_source_cancel(listener);
 		listener = nil;
 		frame_callback = NULL;

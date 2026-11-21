@@ -21,6 +21,7 @@ extern "C" void obs_ios_websocket_stop(dispatch_function_t);
 #ifdef OBS_APP_PRIVILEGED
 extern "C" void obs_app_install_privileged_host(void);
 extern "C" void obs_app_privileged_background_job(bool);
+extern "C" void obs_app_privileged_frontend_ready(void);
 #endif
 
 void obs_app_update_background_job(bool active)
@@ -129,6 +130,9 @@ bool obs_app_start(const char *locale, const char *configDirectory)
 	}
 	obs_ios_load_extra_plugins();
 	obs_app_frontend_ready();
+#ifdef OBS_APP_PRIVILEGED
+	obs_app_privileged_frontend_ready();
+#endif
 	return true;
 }
 

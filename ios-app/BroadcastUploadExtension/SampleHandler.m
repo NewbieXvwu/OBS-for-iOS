@@ -1,9 +1,10 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /* 自研必要性证明：官方 mac-capture 消费进程内的 ScreenCaptureKit 帧，无法作为
- * ReplayKit 广播扩展。XPC 的命名监听器要求系统注册服务，ReplayKit 不向宿主
- * 提供扩展连接。这里复用 ReplayKit、CoreMedia 和 App Group 的 Unix 套接字。 */
+ * ReplayKit 广播扩展。这里复用 IOSurface/Mach 传递视频，App Group 套接字传递
+ * PCM。仅命名 Mach 服务查询失败时，视频改用原有共享页通道。 */
 
 #import <ReplayKit/ReplayKit.h>
+#import <IOSurface/IOSurfaceRef.h>
 #include <AudioToolbox/AudioToolbox.h>
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -18,6 +19,7 @@ struct Slot {
 
 @interface OBSSampleHandler : RPBroadcastSampleHandler {
 	int connection;
+		mach_port_t screen_port;
 	struct Slot video[2], audio[4];
 }
 @end
@@ -98,7 +100,7 @@ static bool write_slot(struct Slot *slot, const void *first, size_t first_size, 
 		slot->capacity = length;
 	}
 	slot->frame->capacity = (uint32_t)slot->capacity;
-	// ponytail: copy ReplayKit's borrowed planes into file-backed pages; the receiver maps these pages directly.
+	/* PCM and the explicitly requested nonprivileged video fallback only. */
 	return pwrite(slot->fd, first, first_size, offset) == (ssize_t)first_size &&
 	       (!second_size || pwrite(slot->fd, second, second_size, offset + first_size) == (ssize_t)second_size);
 }
@@ -113,6 +115,45 @@ static uint32_t color(CVPixelBufferRef pixel, CFStringRef key)
 		if ([value isEqualToString:(__bridge NSString *)values[i]])
 			return i + 1;
 	return 0;
+}
+
+static uint64_t sample_timestamp(CMSampleBufferRef sample)
+{
+	CMTime pts = CMSampleBufferGetPresentationTimeStamp(sample);
+	return CMTIME_IS_NUMERIC(pts) && pts.value >= 0
+		? (uint64_t)CMTimeConvertScale(pts, 1000000000, kCMTimeRoundingMethod_Default).value : 0;
+}
+
+static bool send_surface(mach_port_t destination, CMSampleBufferRef sample)
+{
+	CVPixelBufferRef pixel = CMSampleBufferGetImageBuffer(sample);
+	IOSurfaceRef surface = pixel ? CVPixelBufferGetIOSurface(pixel) : NULL;
+	if (!surface)
+		return false;
+	mach_port_t port = IOSurfaceCreateMachPort(surface);
+	if (!MACH_PORT_VALID(port))
+		return false;
+	struct BroadcastSurfaceMessage message = {0};
+	message.header.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0) | MACH_MSGH_BITS_COMPLEX;
+	message.header.msgh_size = sizeof(message);
+	message.header.msgh_remote_port = destination;
+	message.header.msgh_id = OBS_BROADCAST_MACH_FRAME;
+	message.body.msgh_descriptor_count = 1;
+	message.surface.name = port;
+	message.surface.disposition = MACH_MSG_TYPE_MOVE_SEND;
+	message.surface.type = MACH_MSG_PORT_DESCRIPTOR;
+	NSNumber *orientation = (__bridge id)CMGetAttachment(sample, (__bridge CFStringRef)RPVideoSampleOrientationKey, NULL);
+	message.frame.orientation = orientation.intValue;
+	message.frame.matrix = color(pixel, kCVImageBufferYCbCrMatrixKey);
+	message.frame.primaries = color(pixel, kCVImageBufferColorPrimariesKey);
+	message.frame.transfer = color(pixel, kCVImageBufferTransferFunctionKey);
+	message.frame.timestamp = sample_timestamp(sample);
+	/* A full receive queue drops this frame without blocking ReplayKit or copying its planes. */
+	kern_return_t result = mach_msg(&message.header, MACH_SEND_MSG | MACH_SEND_TIMEOUT,
+		sizeof(message), 0, MACH_PORT_NULL, 0, MACH_PORT_NULL);
+	if (result != KERN_SUCCESS)
+		mach_port_deallocate(mach_task_self(), port);
+	return result == KERN_SUCCESS;
 }
 
 static bool copy_video(struct Slot *slot, CMSampleBufferRef sample)
@@ -212,8 +253,11 @@ static bool copy_audio(struct Slot *slot, CMSampleBufferRef sample)
 	if (connection >= 0) {
 		const int enabled = 1;
 		setsockopt(connection, SOL_SOCKET, SO_NOSIGPIPE, &enabled, sizeof(enabled));
-		if (connect(connection, (struct sockaddr *)&address, address.sun_len) == 0)
+		if (connect(connection, (struct sockaddr *)&address, address.sun_len) == 0) {
+			screen_port = broadcast_lookup();
+			NSLog(@"[OBS broadcast] video transport: %@", MACH_PORT_VALID(screen_port) ? @"IOSurface Mach" : @"shared pages (Mach lookup failed)");
 			return;
+		}
 		[self broadcastFinished];
 	}
 	[self finishBroadcastWithError:[NSError errorWithDomain:OBS_BROADCAST_ID code:1
@@ -225,6 +269,9 @@ static bool copy_audio(struct Slot *slot, CMSampleBufferRef sample)
 	if (connection >= 0)
 		close(connection);
 	connection = -1;
+	if (MACH_PORT_VALID(screen_port))
+		mach_port_deallocate(mach_task_self(), screen_port);
+	screen_port = MACH_PORT_NULL;
 	close_slots(video, sizeof(video) / sizeof(*video));
 	close_slots(audio, sizeof(audio) / sizeof(*audio));
 }
@@ -250,13 +297,15 @@ static bool copy_audio(struct Slot *slot, CMSampleBufferRef sample)
 			userInfo:@{NSLocalizedDescriptionKey: @"The OBS display source closed."}]];
 		return;
 	}
+	if (is_video && MACH_PORT_VALID(screen_port)) {
+		send_surface(screen_port, sample);
+		return;
+	}
 	struct Slot *slot = is_video ? free_slot(video, sizeof(video) / sizeof(*video))
 				     : free_slot(audio, sizeof(audio) / sizeof(*audio));
 	if (!slot || !(is_video ? copy_video(slot, sample) : copy_audio(slot, sample)))
 		return;
-	CMTime pts = CMSampleBufferGetPresentationTimeStamp(sample);
-	slot->frame->timestamp = CMTIME_IS_NUMERIC(pts) && pts.value >= 0
-		? (uint64_t)CMTimeConvertScale(pts, 1000000000, kCMTimeRoundingMethod_Default).value : 0;
+	slot->frame->timestamp = sample_timestamp(sample);
 	atomic_store_explicit(&slot->frame->state, SlotReady, memory_order_release);
 	if (!send_slot(connection, is_video ? BroadcastVideo : BroadcastAudio, slot))
 		atomic_store_explicit(&slot->frame->state, SlotFree, memory_order_release);

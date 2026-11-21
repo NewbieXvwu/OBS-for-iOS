@@ -3,6 +3,7 @@
  * 路径和任务接口依赖 Android。这里把 iOS 系统授权与原版模块加载和子进程接口相连。 */
 
 #import <BackgroundTasks/BackgroundTasks.h>
+#import <AVFAudio/AVFAudio.h>
 #import <UIKit/UIKit.h>
 #include <dlfcn.h>
 #include <errno.h>
@@ -31,7 +32,33 @@ static NSString *const plugins_directory = @"/var/jb/Library/OBS/Plugins";
 static NSString *const gpu_entitlement = @"com.apple.developer.background-tasks.continued-processing.gpu";
 static BGTask *background_task;
 static NSString *background_identifier;
+static bool output_running, screen_running;
+static AVAudioEngine *keepalive_audio;
+static AVAudioSourceNode *silence;
+static id process_assertion;
+static _Atomic(bool) assertion_active;
+static uint64_t assertion_generation;
 extern char **environ;
+
+/* ABI from Apple's WebKit AssertionServicesSPI.h; resolve the class at runtime only. */
+@protocol OBSProcessAssertion <NSObject>
+- (instancetype)initWithPID:(pid_t)pid flags:(uint32_t)flags reason:(uint32_t)reason
+	name:(NSString *)name withHandler:(void (^)(BOOL))handler;
+- (void)setInvalidationHandler:(void (^)(void))handler;
+- (void)invalidate;
+@end
+
+static Class assertion_class(void)
+{
+	static dispatch_once_t once;
+	dispatch_once(&once, ^{
+		dlopen("/System/Library/PrivateFrameworks/AssertionServices.framework/AssertionServices", RTLD_LAZY | RTLD_LOCAL);
+	});
+	Class cls = NSClassFromString(@"BKSProcessAssertion");
+	return [cls instancesRespondToSelector:@selector(initWithPID:flags:reason:name:withHandler:)] &&
+	       [cls instancesRespondToSelector:@selector(invalidate)] &&
+	       [cls instancesRespondToSelector:@selector(setInvalidationHandler:)] ? cls : Nil;
+}
 
 static bool has_entitlement(NSString *name)
 {
@@ -138,18 +165,108 @@ static void probe_muxer(void)
 
 static bool keepalive(bool enabled)
 {
-	return enabled && background_task != nil;
+	return enabled && (output_running || screen_running) &&
+		(background_task != nil || atomic_load_explicit(&assertion_active, memory_order_relaxed));
+}
+
+static void suspend_if_needed(void)
+{
+	if (UIApplication.sharedApplication.applicationState != UIApplicationStateActive && !keepalive(true))
+		obs_ios_set_video_suspended(true);
+}
+
+static void start_keepalive_audio(void)
+{
+	AVAudioSession *session = AVAudioSession.sharedInstance;
+	NSError *error = nil;
+	/* The microphone owns PlayAndRecord. Preserve that category and its input route. */
+	if ((![session.category isEqualToString:AVAudioSessionCategoryPlayAndRecord] &&
+	     ![session setCategory:AVAudioSessionCategoryPlayback withOptions:AVAudioSessionCategoryOptionMixWithOthers error:&error]) ||
+	    ![session setActive:YES error:&error]) {
+		blog(LOG_WARNING, "[iOS host] Background audio: %s", error.localizedDescription.UTF8String);
+		return;
+	}
+	if (!keepalive_audio) {
+		keepalive_audio = [AVAudioEngine new];
+		AVAudioFormat *format = [[AVAudioFormat alloc] initStandardFormatWithSampleRate:48000 channels:1];
+		silence = [[AVAudioSourceNode alloc] initWithFormat:format renderBlock:
+			^OSStatus(BOOL *is_silence, const AudioTimeStamp *time, AVAudioFrameCount frames, AudioBufferList *buffers) {
+				*is_silence = YES;
+				for (UInt32 i = 0; i < buffers->mNumberBuffers; i++)
+					memset(buffers->mBuffers[i].mData, 0, buffers->mBuffers[i].mDataByteSize);
+				return noErr;
+			}];
+		[keepalive_audio attachNode:silence];
+		[keepalive_audio connect:silence to:keepalive_audio.mainMixerNode format:format];
+	}
+	if (!keepalive_audio.running && ![keepalive_audio startAndReturnError:&error])
+		blog(LOG_WARNING, "[iOS host] Background audio: %s", error.localizedDescription.UTF8String);
+}
+
+static void update_process_keepalive(void)
+{
+	if (!(output_running || screen_running)) {
+		assertion_generation++;
+		atomic_store_explicit(&assertion_active, false, memory_order_relaxed);
+		if (process_assertion)
+			blog(LOG_INFO, "[iOS host] Process assertion released");
+		[(id<OBSProcessAssertion>)process_assertion invalidate];
+		process_assertion = nil;
+		[keepalive_audio stop];
+		keepalive_audio = nil;
+		silence = nil;
+		/* AVAudioSession is shared with microphone capture and monitoring; stopping this engine ends our audio activity. */
+		suspend_if_needed();
+		return;
+	}
+	start_keepalive_audio();
+	if (process_assertion || !has_entitlement(@"com.apple.multitasking.systemappassertions"))
+		return;
+	Class cls = assertion_class();
+	if (!cls)
+		return;
+	const uint64_t generation = ++assertion_generation;
+	/* PreventTaskSuspend | PreventTaskThrottleDown | AllowIdleSleep, FinishTaskUnbounded. */
+	process_assertion = [(id<OBSProcessAssertion>)[cls alloc] initWithPID:getpid() flags:7 reason:10004
+		name:@"OBS capture and output" withHandler:^(BOOL acquired) {
+			dispatch_async(dispatch_get_main_queue(), ^{
+				if (generation != assertion_generation)
+					return;
+				atomic_store_explicit(&assertion_active, acquired, memory_order_relaxed);
+				blog(LOG_INFO, "[iOS host] Process assertion %s", acquired ? "acquired" : "denied");
+				if (acquired)
+					obs_ios_set_video_suspended(false);
+				else
+					suspend_if_needed();
+			});
+		}];
+	[(id<OBSProcessAssertion>)process_assertion setInvalidationHandler:^{
+		dispatch_async(dispatch_get_main_queue(), ^{
+			if (generation != assertion_generation)
+				return;
+			atomic_store_explicit(&assertion_active, false, memory_order_relaxed);
+			process_assertion = nil;
+			suspend_if_needed();
+		});
+	}];
+}
+
+void obs_app_privileged_screen_job(bool running)
+{
+	dispatch_async(dispatch_get_main_queue(), ^{
+		screen_running = running;
+		update_process_keepalive();
+	});
 }
 
 static void finish_background_task(BGTask *task, bool success)
 {
 	if (!task || task != background_task)
 		return;
-	if (UIApplication.sharedApplication.applicationState != UIApplicationStateActive)
-		obs_ios_set_video_suspended(true);
 	background_task = nil;
 	background_identifier = nil;
 	[task setTaskCompletedWithSuccess:success];
+	suspend_if_needed();
 }
 
 static bool register_background_task(void)
@@ -184,6 +301,8 @@ static bool register_background_task(void)
 
 void obs_app_privileged_background_job(bool running)
 {
+	output_running = running;
+	update_process_keepalive();
 	if (!(get_capabilities() & OBS_IOS_CAP_BACKGROUND_GPU))
 		return;
 	if (@available(iOS 26.0, *)) {
@@ -216,6 +335,44 @@ void obs_app_privileged_background_job(bool running)
 	}
 }
 
+static void output_event(enum obs_frontend_event event, void *context)
+{
+	switch (event) {
+	case OBS_FRONTEND_EVENT_STREAMING_STARTED:
+	case OBS_FRONTEND_EVENT_STREAMING_STOPPED:
+	case OBS_FRONTEND_EVENT_RECORDING_STARTED:
+	case OBS_FRONTEND_EVENT_RECORDING_STOPPED:
+	case OBS_FRONTEND_EVENT_REPLAY_BUFFER_STARTED:
+	case OBS_FRONTEND_EVENT_REPLAY_BUFFER_STOPPED:
+	case OBS_FRONTEND_EVENT_EXIT:
+		dispatch_async(dispatch_get_main_queue(), ^{
+			obs_app_privileged_background_job(event != OBS_FRONTEND_EVENT_EXIT &&
+				(obs_frontend_streaming_active() || obs_frontend_recording_active() || obs_frontend_replay_buffer_active()));
+		});
+		break;
+	default:
+		break;
+	}
+}
+
+void obs_app_privileged_frontend_ready(void)
+{
+	obs_frontend_add_event_callback(output_event, NULL);
+	NSNotificationCenter *center = NSNotificationCenter.defaultCenter;
+	[center addObserverForName:AVAudioEngineConfigurationChangeNotification object:nil queue:NSOperationQueue.mainQueue
+		usingBlock:^(NSNotification *notification) {
+			if (notification.object == keepalive_audio && (output_running || screen_running))
+				start_keepalive_audio();
+		}];
+	[center addObserverForName:AVAudioSessionInterruptionNotification object:nil queue:NSOperationQueue.mainQueue
+		usingBlock:^(NSNotification *notification) {
+			if ([notification.userInfo[AVAudioSessionInterruptionTypeKey] unsignedIntegerValue] == AVAudioSessionInterruptionTypeBegan)
+				[keepalive_audio stop];
+			else if (output_running || screen_running)
+				start_keepalive_audio();
+		}];
+}
+
 void obs_app_install_privileged_host(void)
 {
 	uint32_t detected = 0;
@@ -223,7 +380,8 @@ void obs_app_install_privileged_host(void)
 		detected |= OBS_IOS_CAP_DYNAMIC_PLUGIN;
 	if (os_mkdirs(public_directory) >= 0 && access(public_directory, W_OK) == 0)
 		detected |= OBS_IOS_CAP_PUBLIC_STORAGE;
-	if (register_background_task())
+	if (register_background_task() ||
+	    (has_entitlement(@"com.apple.multitasking.systemappassertions") && has_entitlement(gpu_entitlement) && assertion_class()))
 		detected |= OBS_IOS_CAP_BACKGROUND_GPU;
 	if (obs_ios_replaykit_available())
 		detected |= OBS_IOS_CAP_PRIVATE_SCREEN | OBS_IOS_CAP_REPLAYKIT;

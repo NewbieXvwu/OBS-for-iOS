@@ -6,6 +6,7 @@ if(OBS_IOS_PRIVILEGED)
   <string>OBS uses the display you select as a video source.</string>
   <key>UIBackgroundModes</key>
   <array>
+	<string>audio</string>
     <string>processing</string>
     <string>screen-capture</string>
   </array>
@@ -48,7 +49,7 @@ if(OBS_IOS_PRIVILEGED)
     XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "1,2"
   )
   target_link_libraries(OBSBroadcast PRIVATE "-framework ReplayKit" "-framework CoreMedia"
-    "-framework CoreVideo" "-framework Foundation")
+    "-framework CoreVideo" "-framework Foundation" "-framework IOSurface")
   target_sources(OBSApp PRIVATE HostPrivileged/HostPrivileged.m HostPrivileged/ReplayKit.m)
   if(NOT CMAKE_OSX_SYSROOT MATCHES "[iI][pP]hone[sS]imulator")
     target_sources(OBSApp PRIVATE HostPrivileged/ScreenCapture.m)
@@ -60,7 +61,8 @@ if(OBS_IOS_PRIVILEGED)
   )
   target_compile_definitions(OBSApp PRIVATE OBS_APP_PRIVILEGED=1)
   target_link_options(OBSApp PRIVATE "LINKER:-export_dynamic")
-  target_link_libraries(OBSApp PRIVATE "-framework BackgroundTasks" "-framework Security" "-framework ReplayKit")
+  target_link_libraries(OBSApp PRIVATE "-framework BackgroundTasks" "-framework Security" "-framework ReplayKit"
+    "-framework AVFAudio" "-framework IOSurface")
 endif()
 target_link_libraries(OBSApp PRIVATE OBS::libobs OBS::libobs-metal OBS::frontend-api ${modules}
   "-framework UIKit" "-framework SwiftUI" "-framework Metal" "-framework QuartzCore")

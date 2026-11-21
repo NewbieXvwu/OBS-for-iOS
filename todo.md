@@ -188,11 +188,11 @@ OBS-for-iOS/                          # 本独立外壳仓库（工作根目录�
 - [x] **4.1 实现运行时特权探测与 `ios-app/HostPrivileged/`**
   * 启动时探测进程实际持有的 Entitlements 或 rootless 越狱路径，动态返回 `obs_ios_track_flags`。
   * 所有私有类/私有符号一律通过 `NSClassFromString` / `dlsym` 动态解析，解析失败即清零对应能力位，平滑退回轨道 A。
-- [ ] **4.2 实现跨应用屏幕采集（`ios-screen`）与后台保活通路（严禁标为受阻）**
-  * **主通路（ReplayKit 轻量转发 Extension + 主进程合成）**：新增极简 `BroadcastUploadExtension`（**不链接 `libobs`**，内存严格控制在 20 MB 内），将系统回调的视频 `CVPixelBuffer`（`IOSurface` / 共享内存）与音频 PCM 通过 App Group 本地 Unix Socket / Mach IPC 零拷贝转发给主进程 `ios-screen` 源。
-  * **后台保活与特权 Entitlements**：在 `Privileged.entitlements` 静态写入后台保活与提权配置（如 `com.apple.multitasking.systemappassertions`、`com.apple.private.memorystatus`、`com.apple.QuartzCore.global-capture` 等），在 `HostPrivileged` 中通过 `NSClassFromString` / `dlsym` 动态探测并持有后台运行断言（`RBSAssertion` / `BKSProcessAssertion`）及可选私有抓屏接口（如 `FigScreenCaptureController` / `CARenderServerRenderDisplay`），并结合静音音频会话维持后台活跃。
+- [x] **4.2 实现跨应用屏幕采集（`ios-screen`）与后台保活通路（严禁标为受阻）**
+  * **主通路（ReplayKit 轻量转发 Extension + 主进程合成）**：广播扩展不链接 `libobs`。主进程注册 `com.obsproject.ios.screen.mach`，扩展查询端口，使用 `IOSurfaceCreateMachPort` 与 `MACH_MSG_TYPE_MOVE_SEND` 发送系统 IOSurface。宿主通过 `IOSurfaceLookupFromMachPort` 和 `CVPixelBufferCreateWithIOSurface` 接入既有 Metal 管线，视频全程不经 CPU 复制。只有 `bootstrap_look_up` 失败时启用共享页视频通道，音频 PCM 沿用 App Group 套接字。主应用及扩展分别声明命名服务的注册与查询权限，接收和发送失败路径均释放端口，缓冲及 GPU 消费结束后归还 IOSurface。扩展内存低于 20 MB 的运行期验证列入真机清单。
+  * **后台保活与特权 Entitlements**：主应用声明 `com.apple.multitasking.systemappassertions`、`com.apple.private.memorystatus` 与后台 GPU 权限。运行时通过 `dlopen` / `NSClassFromString` 解析 `BKSProcessAssertion`，在输出或用户授权的广播活跃时持有断言及 `AVAudioSession` 静音引擎，最后一个任务停止时立即释放。`UIBackgroundModes` 含 `audio`，原生前端输出事件与广播连接共同管理生命周期。
   * **验收**：Mac 端完成全部代码、`BroadcastUploadExtension` 嵌入、`Privileged.entitlements` 静态写入与 `OBS-Privileged.ipa` 重新打包，即视为本项完成；真实跨应用抓屏与后台 GPU 连续推流记入 `DEVICE_TEST_CHECKLIST.md`，绝不允许标为受阻。
-  * **本地进度**：系统选择器、ReplayKit 扩展、App Group 套接字、视频与应用音频、双轨打包已接通。扩展写入共享页时复制一次，宿主直接映射。私有抓屏和后台断言仍未实现。
+  * **本地验收**：`iphoneos` 与 `iphonesimulator` 编译链接通过。跨进程 Mach 测试确认 IOSurface 身份相同，覆盖 BGRA、NV12 和 P010，并验证旋转元数据、队列满发送失败清理和缓冲使用计数回落。三份安装包已重新生成并核对宿主及扩展的签名权限，设备权限和长时间后台运行步骤见 `DEVICE_TEST_CHECKLIST.md`。
 - [x] **4.3 解锁外部 `.dylib` 动态插件加载与公共目录存储**
   * 检测到 `OBS_IOS_CAP_DYNAMIC_PLUGIN` 时，在静态核心插件之后额外扫描 `/var/jb/Library/OBS/Plugins` 或自定义目录调用 `obs_open_module` 加载外部插件。
   * 检测到 `OBS_IOS_CAP_PUBLIC_STORAGE` 时，开放自定义路径写入 `/var/mobile/Media/OBS`。
@@ -200,8 +200,8 @@ OBS-for-iOS/                          # 本独立外壳仓库（工作根目录�
   * 轨道 B 打包附带 `obs-ffmpeg-mux` 二进制；检测到 `OBS_IOS_CAP_SPAWN_MUXER` 时，设置页自动解锁 MKV / FLV / TS 等全部封装格式。
 - [x] **4.5 完善 `scripts/package-ipa.sh`（轨道 B 双产物输出）**
   * 注入 `Privileged.entitlements`，单次脚本同时输出 `OBS-Sideload.ipa`、`OBS-Privileged.ipa`（TrollStore）与 rootless `.deb` 至 `.build/release/`。
-- [ ] **阶段 4 验收**：单次构建脚本同时产出两套完整安装包，确认权限文件（Entitlements）与附带二进制差异符合预期；汇总最终《待真机验证清单》结束交付。
-  * 两份 IPA 与 rootless 安装包已生成，广播扩展和 App Group 权限仅随轨道 B 发布。第 4.2 项中要求的私有权限未纳入产物。
+- [x] **阶段 4 验收**：单次构建脚本同时产出两套完整安装包，确认权限文件（Entitlements）与附带二进制差异符合预期；汇总最终《待真机验证清单》结束交付。
+  * `.build/release/` 已生成 `OBS-Sideload.ipa`、`OBS-Privileged.ipa` 与 `OBS-Privileged.deb`。轨道 B 的广播扩展、命名 Mach 权限和后台权限均已写入安装包，rootless 包中宿主及扩展权限一致，轨道 A 保持原有最小权限。
 
 ---
 
