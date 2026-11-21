@@ -4,11 +4,76 @@
 
 #import "OBSBridge.h"
 #include <graphics/vec2.h>
+#include <graphics/vec3.h>
+#include <graphics/matrix4.h>
 #include <util/base.h>
+#include <ctime>
+#include <mutex>
+#include <string>
+
+#ifdef OBS_APP_WEBSOCKET
+extern "C" obs_data_t *obs_ios_websocket_settings(void);
+extern "C" void obs_ios_websocket_apply(obs_data_t *);
+extern "C" void obs_ios_websocket_disconnect(const char *);
+#endif
+
+obs_data_t *obs_app_websocket_settings(void)
+{
+#ifdef OBS_APP_WEBSOCKET
+	return obs_ios_websocket_settings();
+#else
+	return nullptr;
+#endif
+}
+
+void obs_app_websocket_apply(obs_data_t *settings)
+{
+#ifdef OBS_APP_WEBSOCKET
+	obs_ios_websocket_apply(settings);
+#endif
+}
+
+void obs_app_websocket_disconnect(const char *address)
+{
+#ifdef OBS_APP_WEBSOCKET
+	obs_ios_websocket_disconnect(address);
+#endif
+}
+
+static log_handler_t originalLogger;
+static void *originalLoggerData;
+static FILE *sessionLog;
+
+static void app_log(int level, const char *format, va_list arguments, void *)
+{
+	va_list copied;
+	va_copy(copied, arguments);
+	if (originalLogger)
+		originalLogger(level, format, copied, originalLoggerData);
+	va_end(copied);
+	flockfile(sessionLog);
+	vfprintf(sessionLog, format, arguments);
+	fputc('\n', sessionLog);
+	fflush(sessionLog);
+	funlockfile(sessionLog);
+}
 
 bool obs_app_start(const char *locale, const char *configDirectory)
 {
 	setvbuf(stdout, NULL, _IOLBF, 0);
+	std::string logDirectory = std::string(configDirectory) + "/logs";
+	if (os_mkdirs(logDirectory.c_str()) >= 0) {
+		auto now = std::time(nullptr);
+		std::tm local = {};
+		char name[40];
+		localtime_r(&now, &local);
+		std::strftime(name, sizeof(name), "%Y-%m-%d %H-%M-%S.txt", &local);
+		sessionLog = fopen((logDirectory + "/" + name).c_str(), "a");
+		if (sessionLog) {
+			base_get_log_handler(&originalLogger, &originalLoggerData);
+			base_set_log_handler(app_log, NULL);
+		}
+	}
 	if (!obs_startup(locale, configDirectory, NULL))
 		return false;
 
@@ -28,20 +93,34 @@ bool obs_app_start(const char *locale, const char *configDirectory)
 		.range = VIDEO_RANGE_PARTIAL,
 		.scale_type = OBS_SCALE_BICUBIC,
 	};
-	if (!obs_reset_audio(&audio) || obs_reset_video(&video) != OBS_VIDEO_SUCCESS || !obs_load_core_modules()) {
+	if (!obs_reset_audio(&audio) || obs_reset_video(&video) != OBS_VIDEO_SUCCESS ||
+	    !obs_app_frontend_open(configDirectory, locale) || !obs_load_core_modules()) {
 		obs_shutdown();
+		obs_app_frontend_close();
 		return false;
 	}
 	obs_ios_load_extra_plugins();
-	obs_post_load_modules();
+	obs_app_frontend_ready();
 	return true;
 }
 
-static void render_program(void *, uint32_t width, uint32_t height)
+struct obs_app_display {
+	obs_display_t *display = NULL;
+	std::mutex sourceMutex;
+	obs_source_t *source = NULL;
+};
+
+static void render_display(void *opaque, uint32_t width, uint32_t height)
 {
+	auto *display = static_cast<obs_app_display_t *>(opaque);
 	obs_video_info video;
 	if (!obs_get_video_info(&video))
 		return;
+	obs_source_t *source;
+	{
+		std::lock_guard lock(display->sourceMutex);
+		source = obs_source_get_ref(display->source);
+	}
 	const double scale = fmin((double)width / video.base_width, (double)height / video.base_height);
 	const int targetWidth = (int)(video.base_width * scale);
 	const int targetHeight = (int)(video.base_height * scale);
@@ -49,12 +128,16 @@ static void render_program(void *, uint32_t width, uint32_t height)
 	gs_projection_push();
 	gs_ortho(0, video.base_width, 0, video.base_height, -100, 100);
 	gs_set_viewport(((int)width - targetWidth) / 2, ((int)height - targetHeight) / 2, targetWidth, targetHeight);
-	obs_render_main_texture();
+	if (source)
+		obs_source_video_render(source);
+	else
+		obs_render_main_texture();
 	gs_projection_pop();
 	gs_viewport_pop();
+	obs_source_release(source);
 }
 
-obs_display_t *obs_app_create_display(UIView *view, uint32_t width, uint32_t height)
+obs_app_display_t *obs_app_create_display(UIView *view, uint32_t width, uint32_t height)
 {
 	gs_init_data data = {};
 	data.window.view = view;
@@ -63,9 +146,56 @@ obs_display_t *obs_app_create_display(UIView *view, uint32_t width, uint32_t hei
 	data.format = GS_BGRA;
 	data.zsformat = GS_ZS_NONE;
 	obs_display_t *display = obs_display_create(&data, 0);
-	if (display)
-		obs_display_add_draw_callback(display, render_program, NULL);
-	return display;
+	if (!display)
+		return NULL;
+	auto *handle = new obs_app_display_t;
+	handle->display = display;
+	obs_display_add_draw_callback(display, render_display, handle);
+	return handle;
+}
+
+void obs_app_display_resize(obs_app_display_t *display, uint32_t width, uint32_t height)
+{
+	obs_display_resize(display->display, width, height);
+}
+
+void obs_app_display_set_source(obs_app_display_t *display, obs_source_t *source)
+{
+	obs_source_t *reference = obs_source_get_ref(source);
+	if (reference)
+		obs_source_inc_showing(reference);
+	obs_source_t *previous;
+	{
+		std::lock_guard lock(display->sourceMutex);
+		previous = display->source;
+		display->source = reference;
+	}
+	if (previous)
+		obs_source_dec_showing(previous);
+	obs_source_release(previous);
+}
+
+void obs_app_display_destroy(obs_app_display_t *display)
+{
+	obs_display_destroy(display->display);
+	obs_app_display_set_source(display, NULL);
+	delete display;
+}
+
+CGRect obs_app_item_bounds(obs_sceneitem_t *item)
+{
+	matrix4 matrix;
+	obs_sceneitem_get_box_transform(item, &matrix);
+	CGRect box = CGRectNull;
+	for (int y = 0; y < 2; y++) {
+		for (int x = 0; x < 2; x++) {
+			vec3 point;
+			vec3_set(&point, x, y, 0);
+			vec3_transform(&point, &point, &matrix);
+			box = CGRectUnion(box, CGRectMake(point.x, point.y, 0, 0));
+		}
+	}
+	return box;
 }
 
 static obs_output_t *start_output(const char *id, obs_data_t *settings, obs_encoder_t *video, obs_encoder_t *audio,

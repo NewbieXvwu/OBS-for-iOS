@@ -4,15 +4,28 @@ get_property(module_data GLOBAL PROPERTY OBS_IOS_MODULE_DATA)
 add_executable(OBSApp MACOSX_BUNDLE
   CoreBridge/OBSBridge.h
   CoreBridge/OBSBridge.mm
+  CoreBridge/OBSFrontend.mm
   UI/OBSApp.swift
+  UI/OBSLocale.swift
+  UI/WorkspaceModel.swift
+  UI/WorkspaceView.swift
+  UI/WorkspacePanels.swift
+  UI/OBSPropertiesView.swift
+  UI/OBSSettingsView.swift
+  UI/OBSWebSocketSettingsView.swift
+  UI/OBSHotkeys.swift
 )
-target_link_libraries(OBSApp PRIVATE OBS::libobs OBS::libobs-metal ${modules}
+if(ENABLE_WEBSOCKET)
+  target_compile_definitions(OBSApp PRIVATE OBS_APP_WEBSOCKET=1)
+endif()
+target_link_libraries(OBSApp PRIVATE OBS::libobs OBS::libobs-metal OBS::frontend-api ${modules}
   "-framework UIKit" "-framework SwiftUI" "-framework Metal" "-framework QuartzCore")
 set_target_properties(OBSApp PROPERTIES
   OUTPUT_NAME OBS
   MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/Info.plist"
   XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER org.obsproject.studio.ios
   XCODE_ATTRIBUTE_SWIFT_VERSION 5.0
+  OBJCXX_STANDARD 17
   XCODE_ATTRIBUTE_CLANG_ENABLE_OBJC_ARC YES
   XCODE_ATTRIBUTE_SWIFT_OBJC_BRIDGING_HEADER "${CMAKE_CURRENT_SOURCE_DIR}/CoreBridge/OBSBridge.h"
   XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "1,2"

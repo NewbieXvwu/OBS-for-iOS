@@ -136,7 +136,7 @@ OBS-for-iOS/                          # 本独立外壳仓库（工作根目录�
 - [x] **1.4 复用改造 `obs-studio/plugins/ios-videotoolbox/`**
   * 直接基于官方 `mac-videotoolbox` 改造为 iOS H.264 / HEVC（含 Main10 10-bit HDR）硬编插件。
   * 通过 `CVMetalTextureCache` 将合成后的 Metal 纹理零拷贝映射到 `CVPixelBuffer` 送入 `VTCompressionSession`，保留完整码率控制（CBR/VBR/CRF）、Profile、Keyframe Interval 与动态码率（Dynamic Bitrate）支持。
-- [ ] **1.5 编写 `scripts/build-libobs-ios.sh` 并打通模拟器无界面推流/录像闭环**
+- [x] **1.5 编写 `scripts/build-libobs-ios.sh` 并打通模拟器无界面推流/录像闭环**
   * 产出包含 `iphoneos` + `iphonesimulator` 的 `libobs.xcframework`（或静态归档集）到 `.build/ios/`。
   * 在 `ios-app/` 建立最小可启动工程，在模拟器中加载 `color_source` + `text-freetype2` + `obs-filters` + 编码器 + `mp4_output`（Hybrid MP4）与本地 RTMP 推流验证。
 - [ ] **阶段 1 验收**：`iphoneos` 与 `iphonesimulator` 均编译链接通过；在 iOS Simulator 中自动启动 App 完成 `hybrid_mp4` 录像（用 `ffprobe` 校验轨道正常），随后立即关闭并清理模拟器。
