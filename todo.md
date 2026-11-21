@@ -106,7 +106,7 @@ OBS-for-iOS/                          # 本独立外壳仓库（工作根目录�
 - [x] **0.3 挂载官方 `obs-studio` Fork 为 Git Submodule**
   * 将 `NewbieXvwu/obs-studio` 作为 submodule 挂载到 `obs-studio/`，切出独立分支 `ios-port`。
   * **约束**：不得修改 `obs-studio/frontend/` 下的桌面 Qt 源码（仅将其作为 1:1 复刻蓝本和 `.ini` 词条/资源数据源）。
-- [ ] **0.4 配置工作区隔离构建工具（`.workspace-tools/`）**
+- [x] **0.4 配置工作区隔离构建工具（`.workspace-tools/`）**
   * 检查本机 Xcode / Command Line Tools（`iphoneos` 与 `iphonesimulator` SDK）。
   * 所有缺失的构建工具（`cmake`、`ninja`、`pkg-config`、`autoconf`、`automake`、`libtool`、`gas-preprocessor.pl` 等）一律下载解压至 `.workspace-tools/bin/`，脚本内统一 `export PATH="$PWD/.workspace-tools/bin:$PATH"`。
 - [ ] **0.5 编写 `deps-ios/versions.sh` 与 `deps-ios/build.sh`（支持真机 + 模拟器双构型）**
