@@ -100,7 +100,7 @@ OBS-for-iOS/                          # 本独立外壳仓库（工作根目录�
 
 - [x] **0.1 系统通读 `~/OBS-for-Android`（只读，不限范围）**
   * 完整阅读其文档、构建链、`libobs` 宿主总线、`libobs-opengl` 移植、各类原生插件与前端适配代码及排坑注释，总结可复用的工程经验（如插件白名单、无子进程 muxer 策略、前后台保护、容量检查等），写入简短的移植备忘供后续阶段对照。
-- [ ] **0.2 初始化 `OBS-for-iOS` 外壳仓库与 `.gitignore`**
+- [x] **0.2 初始化 `OBS-for-iOS` 外壳仓库与 `.gitignore`**
   * `.gitignore` 必须完整忽略：`.workspace-tools/`、`.deps-src/`、`.deps-build/`、`.deps-prebuilt/`、`.build/`、`.DS_Store`、`*.xcuserdata`。
   * 创建目录 `deps-ios/`、`scripts/`、`ios-app/`。
 - [ ] **0.3 挂载官方 `obs-studio` Fork 为 Git Submodule**

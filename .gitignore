@@ -1,0 +1,7 @@
+/.workspace-tools/
+/.deps-src/
+/.deps-build/
+/.deps-prebuilt/
+/.build/
+.DS_Store
+*.xcuserdata/
