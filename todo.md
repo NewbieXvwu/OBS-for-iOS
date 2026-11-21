@@ -109,7 +109,7 @@ OBS-for-iOS/                          # 本独立外壳仓库（工作根目录�
 - [x] **0.4 配置工作区隔离构建工具（`.workspace-tools/`）**
   * 检查本机 Xcode / Command Line Tools（`iphoneos` 与 `iphonesimulator` SDK）。
   * 所有缺失的构建工具（`cmake`、`ninja`、`pkg-config`、`autoconf`、`automake`、`libtool`、`gas-preprocessor.pl` 等）一律下载解压至 `.workspace-tools/bin/`，脚本内统一 `export PATH="$PWD/.workspace-tools/bin:$PATH"`。
-- [ ] **0.5 编写 `deps-ios/versions.sh` 与 `deps-ios/build.sh`（支持真机 + 模拟器双构型）**
+- [x] **0.5 编写 `deps-ios/versions.sh` 与 `deps-ios/build.sh`（支持真机 + 模拟器双构型）**
   * 为 `iphoneos-arm64` 与 `iphonesimulator-arm64`（`IPHONEOS_DEPLOYMENT_TARGET=16.0`）交叉编译静态库至 `.deps-prebuilt/`，确保不因缺库而阉割官方功能：
     * 核心与编解码：`simde`、`uthash`、`jansson`、`x264`、`x265`（可选软编兜底）、`mbedtls`、`ffmpeg`（启用常用解封装/解码 + `--enable-videotoolbox` + `--disable-programs`）。
     * 滤镜与文字：`speexdsp`、`rnnoise`、`freetype`。
